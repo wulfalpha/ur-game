@@ -1,9 +1,11 @@
 //! Terminal front end for the Royal Game of Ur.
 
 mod app;
+mod cli;
 mod ui;
 
 use app::App;
+use clap::Parser;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use std::io;
@@ -16,11 +18,13 @@ const MAX_POLL: Duration = Duration::from_millis(250);
 const FRAME: Duration = Duration::from_millis(33);
 
 fn main() -> io::Result<()> {
+    // Parse before touching the terminal, so --help and errors print normally.
+    let cli = cli::Cli::parse();
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x5EED);
-    let mut app = App::new(seed);
+    let mut app = cli.into_app(seed, Instant::now());
     ratatui::run(|terminal| run(terminal, &mut app))
 }
 

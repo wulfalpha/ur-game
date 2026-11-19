@@ -37,7 +37,7 @@ impl Difficulty {
     ];
 
     /// Search depth in decision plies (`None` for random play).
-    fn depth(self) -> Option<u32> {
+    pub fn depth(self) -> Option<u32> {
         match self {
             Difficulty::Random => None,
             Difficulty::Easy => Some(1),

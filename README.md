@@ -83,7 +83,8 @@ throws. The game shows all four dice, with the marked tips filled in.
 ## Playing
 
 You need [Rust](https://www.rust-lang.org/tools/install) and a terminal at
-least 82 columns wide and 22 rows tall.
+least 66 columns wide and 12 rows tall. Below 82×22 the game switches to a
+compact landscape layout, which fits a phone turned on its side.
 
 ```
 git clone https://github.com/wulfalpha/ur-game
@@ -92,21 +93,48 @@ cargo run --release
 ```
 
 In the menu, choose Human or Computer for each side. The computer has four
-levels: Random, Easy, Medium and Hard.
+levels: Random, Easy, Medium and Hard. You can also turn the dice and piece
+animations off there.
 
 | Key           | What it does                              |
 |---------------|-------------------------------------------|
 | Space / Enter | Throw the dice, play the highlighted move |
 | ← → / Tab     | Choose between moves                      |
 | 1–9           | Play that move from the list straight away|
-| Space         | Hurry the computer along on its turn      |
+| h             | Hint: show which move the Hard AI would play |
+| Space         | Skip an animation, or hurry the computer  |
 | ?             | Show the rules                            |
 | Esc           | Back to the menu                          |
 | q / Ctrl+C    | Quit                                      |
 
-When you choose a move, the piece that will move gets a yellow border and
-the square it lands on shows a green ghost piece. In the move list, ⚔ marks
-a capture, ✦ a rosette and ♛ a winning move.
+When you choose a move, the piece that will move is highlighted in yellow
+and the square it lands on in green. In the move list, ⚔ marks a capture,
+✦ a rosette and ♛ a winning move.
+
+When you ask for a hint, the cursor jumps to the Hard AI's choice, marked
+★. Every other move shows how much worse it is, such as −2.5. The scale is
+roughly one point per square of progress, so −2.5 is about two and a half
+squares worse. Hints are noted in the log.
+
+### Command-line options
+
+Options are passed after `--` when using `cargo run`:
+
+```
+cargo run --release -- --light human --dark hard --start
+```
+
+| Option               | What it does                                         |
+|----------------------|------------------------------------------------------|
+| `-l, --light PLAYER` | Who plays Light, who moves first (default: `human`)  |
+| `-d, --dark PLAYER`  | Who plays Dark (default: `medium`)                   |
+| `-s, --start`        | Skip the menu and start a game straight away         |
+| `--no-animation`     | Turn off the dice and piece animations               |
+| `--seed NUMBER`      | Replay the same dice throws                          |
+| `--tui`              | Use the terminal interface (currently the only one)  |
+
+`PLAYER` is one of `human`, `random`, `easy`, `medium` or `hard`. Set both
+sides to computer players to watch them play each other.
 
 ## The computer players
 
@@ -132,6 +160,7 @@ cargo run --release --example arena 400
 | `src/game.rs`      | The rules: board, dice, legal moves, captures, rosettes   |
 | `src/ai.rs`        | The computer players                                      |
 | `src/app.rs`       | Game flow for the terminal version: menu, turns, input    |
+| `src/cli.rs`       | Command-line options                                      |
 | `src/ui.rs`        | Drawing the terminal screens                              |
 | `src/main.rs`      | Starts the terminal app                                   |
 | `examples/arena.rs`| Computer-vs-computer matches                              |

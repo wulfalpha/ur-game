@@ -28,6 +28,8 @@ pub const LAND_TIME: Duration = Duration::from_millis(180);
 /// Extra pause on a capture so the hit registers.
 pub const IMPACT_TIME: Duration = Duration::from_millis(350);
 const LOG_CAPACITY: usize = 100;
+/// The hint key asks this level for advice.
+pub const HINT_LEVEL: Difficulty = Difficulty::Hard;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Controller {
@@ -105,6 +107,16 @@ pub struct PieceAnimation {
     pub impact: bool,
 }
 
+/// Advice for the current move choice, aligned with the options list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hint {
+    /// Index of the move the AI recommends.
+    pub best: usize,
+    /// How much worse than the best move each option is, in evaluation
+    /// points (roughly one point per square of progress). `0.0` for the best.
+    pub loss: Vec<f64>,
+}
+
 /// A legal move together with what it would cause, for the move list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MoveOption {
@@ -150,6 +162,8 @@ pub struct App {
     /// Newest entries last.
     pub log: Vec<String>,
     pub show_help: bool,
+    /// Advice shown for the current move choice, if the player asked.
+    pub hint: Option<Hint>,
     pub should_quit: bool,
     pub animations: bool,
     /// Time of the latest input or update; animations are drawn relative to it.
@@ -172,6 +186,7 @@ impl App {
             dice: None,
             log: Vec::new(),
             show_help: false,
+            hint: None,
             should_quit: false,
             animations: true,
             now: Instant::now(),
@@ -289,7 +304,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::F(1) => {
+            KeyCode::Char('?') | KeyCode::F(1) => {
                 self.show_help = true;
                 return;
             }
@@ -390,6 +405,7 @@ impl App {
                             self.play(i, now);
                         }
                     }
+                    KeyCode::Char('h') => self.show_hint(),
                     _ if confirm => {
                         let i = *selected;
                         self.play(i, now);
@@ -438,6 +454,7 @@ impl App {
         self.game = GameState::new();
         self.dice = None;
         self.log.clear();
+        self.hint = None;
         self.push_log(format!(
             "New game: Light ({}) vs Dark ({}).",
             self.controllers[0].label(),
@@ -463,6 +480,7 @@ impl App {
 
     /// The dice have settled on `tips`: work out what the player can do.
     fn resolve_roll(&mut self, tips: u8, now: Instant) {
+        self.hint = None;
         let player = self.game.turn();
         let roll = roll_from_tips(tips as u32);
         self.dice = Some(Dice {
@@ -520,6 +538,7 @@ impl App {
         let Some(&option) = options.get(index) else {
             return;
         };
+        self.hint = None;
         if self.animations {
             self.phase = Phase::Moving {
                 roll,
@@ -529,6 +548,34 @@ impl App {
             self.deadline = Some(now + move_duration(option));
         } else {
             self.commit(roll, option, now);
+        }
+    }
+
+    /// Ask the AI to rate every option, and move the cursor to its pick.
+    fn show_hint(&mut self) {
+        let Phase::Choosing { roll, .. } = self.phase else {
+            return;
+        };
+        let depth = HINT_LEVEL.depth().expect("hint level searches");
+        // Same order as `options`: both come from `legal_moves`.
+        let scores: Vec<f64> = ai::rank_moves(&self.game, roll, depth)
+            .into_iter()
+            .map(|(_, score)| score)
+            .collect();
+        let best = (0..scores.len()).fold(0, |b, i| if scores[i] > scores[b] { i } else { b });
+        let loss = scores.iter().map(|s| scores[best] - s).collect();
+        if let Phase::Choosing {
+            options, selected, ..
+        } = &mut self.phase
+        {
+            *selected = best;
+            let text = format!(
+                "Hint for {}: {}.",
+                self.game.turn(),
+                describe_move(options[best].mv)
+            );
+            self.hint = Some(Hint { best, loss });
+            self.push_log(text);
         }
     }
 
@@ -605,6 +652,7 @@ pub fn describe_move(mv: Move) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
@@ -846,6 +894,39 @@ mod tests {
             app.update(now);
         }
         assert!(matches!(app.phase, Phase::GameOver(_)));
+    }
+
+    #[test]
+    fn hint_picks_the_hard_ai_move_and_rates_the_rest() {
+        // Capturing Dark's advanced piece on 10 is clearly best.
+        let (mut app, now) = human_app_with_position([7, 0, 0, 0, 0, 0, 0], [10, 0, 0, 0, 0, 0, 0]);
+        force_roll(&mut app, 3, now);
+        app.handle_key(key(KeyCode::Char('h')), now);
+        assert!(!app.show_help, "h is hint now, not help");
+        let hint = app.hint.clone().expect("hint shown");
+        let best = app.options()[hint.best].mv;
+        assert_eq!(best, Move { from: 7, to: 10 });
+        assert_eq!(app.selected_move().unwrap().mv, best, "cursor moved to it");
+        let mut rng = StdRng::seed_from_u64(0);
+        assert_eq!(
+            ai::choose_move(&app.game, 3, HINT_LEVEL, &mut rng),
+            Some(best),
+            "agrees with the Hard AI"
+        );
+        assert_eq!(hint.loss[hint.best], 0.0);
+        assert!(hint.loss.iter().all(|&l| l >= 0.0));
+        assert!(app.log.last().unwrap().starts_with("Hint for Light"));
+        // Choosing a move clears the hint.
+        app.handle_key(key(KeyCode::Enter), now);
+        assert_eq!(app.hint, None);
+    }
+
+    #[test]
+    fn hint_does_nothing_outside_choosing() {
+        let (mut app, now) = game_app(Controller::Human, Controller::Human);
+        app.handle_key(key(KeyCode::Char('h')), now);
+        assert_eq!(app.hint, None);
+        assert_eq!(app.phase, Phase::AwaitRoll);
     }
 
     #[test]

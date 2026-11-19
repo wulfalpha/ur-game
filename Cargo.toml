@@ -7,5 +7,6 @@ description = "The Royal Game of Ur, one of the oldest known board games"
 repository = "https://github.com/wulfalpha/ur-game"
 
 [dependencies]
+clap = { version = "4.6.8", features = ["derive"] }
 rand = "0.10.4"
 ratatui = "0.30.2"

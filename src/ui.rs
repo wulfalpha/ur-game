@@ -325,7 +325,7 @@ fn footer_hint(app: &App) -> &'static str {
         Phase::Rolling { .. } | Phase::Moving { .. } => "Space skip · Esc menu · ? rules · q quit",
         _ if !app.current_is_human() => "Space hurry · Esc menu · ? rules · q quit",
         Phase::AwaitRoll => "Space roll · Esc menu · ? rules · q quit",
-        Phase::Choosing { .. } => "←→ select · Enter play · 1-9 quick pick · Esc menu · ? rules",
+        Phase::Choosing { .. } => "←→ select · Enter play · 1-9 pick · h hint · ? rules · Esc menu",
         Phase::NoMoves { .. } => "Space continue · Esc menu · ? rules",
     }
 }
@@ -779,6 +779,13 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
                 }
                 if o.outcome.winner.is_some() {
                     spans.push(Span::styled(" ♛", Style::new().fg(ACCENT).bold()));
+                }
+                if let Some(hint) = &app.hint {
+                    spans.push(if i == hint.best {
+                        Span::styled(" ★", Style::new().fg(ACCENT).bold())
+                    } else {
+                        Span::styled(format!(" −{:.1}", hint.loss[i]), Style::new().fg(DIM))
+                    });
                 }
                 let line = Line::from(spans);
                 if i == *selected {
