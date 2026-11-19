@@ -10,8 +10,8 @@ use ratatui::widgets::{
     Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Widget, Wrap,
 };
 use ur_game::game::{
-    COLS, GameState, PIECES_PER_PLAYER, Player, ROWS, cell_of, is_board_cell, is_rosette_cell,
-    path_position,
+    COLS, FINISH, GameState, PIECES_PER_PLAYER, Player, ROWS, cell_of, is_board_cell,
+    is_rosette_cell, path_position,
 };
 
 const CELL_W: u16 = 6;
@@ -63,7 +63,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 // ---------------------------------------------------------------------------
 
 fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
-    let box_area = area.centered(Constraint::Length(56), Constraint::Length(20));
+    let box_area = area.centered(Constraint::Length(56), Constraint::Length(21));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BOARD_EDGE))
@@ -76,7 +76,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(2),
         Constraint::Length(3),
         Constraint::Length(1),
-        Constraint::Length(4),
+        Constraint::Length(5),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
@@ -128,6 +128,14 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                         Span::styled(format!("◀ {value:^18} ▶"), style),
                     ])
                 }
+                MenuItem::Animation => Line::from(vec![
+                    Span::styled(cursor, style),
+                    Span::styled(format!("  {:<7}", "Animate"), style),
+                    Span::styled(
+                        format!("◀ {:^18} ▶", if app.animations { "On" } else { "Off" }),
+                        style,
+                    ),
+                ]),
                 MenuItem::Start => Line::from(Span::styled(format!("{cursor}Start game"), style)),
                 MenuItem::Quit => Line::from(Span::styled(format!("{cursor}Quit"), style)),
             }
@@ -232,6 +240,8 @@ fn status_line(app: &App) -> Line<'static> {
             ])
             .centered();
         }
+        Phase::Rolling { .. } => " is throwing the dice…".to_string(),
+        Phase::Moving { .. } => " is moving…".to_string(),
         _ if !app.current_is_human() => " (computer) is thinking…".to_string(),
         Phase::AwaitRoll => " to roll the dice".to_string(),
         Phase::Choosing { .. } => " to choose a move".to_string(),
@@ -243,6 +253,7 @@ fn status_line(app: &App) -> Line<'static> {
 fn footer_hint(app: &App) -> &'static str {
     match &app.phase {
         Phase::GameOver(_) => "Enter/n rematch · Esc menu · q quit",
+        Phase::Rolling { .. } | Phase::Moving { .. } => "Space skip · Esc menu · ? rules · q quit",
         _ if !app.current_is_human() => "Space hurry · Esc menu · ? rules · q quit",
         Phase::AwaitRoll => "Space roll · Esc menu · ? rules · q quit",
         Phase::Choosing { .. } => "←→ select · Enter play · 1-9 quick pick · Esc menu · ? rules",
@@ -253,11 +264,17 @@ fn footer_hint(app: &App) -> &'static str {
 /// "● Light  ○○○○○ waiting      home ●●"
 fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
     let color = player_color(player);
-    let waiting = app.game.waiting(player);
-    let finished = app.game.finished(player);
-    let selected = app.selected_move().filter(|_| app.game.turn() == player);
-    let entry_hl = selected.is_some_and(|o| o.mv.is_entry());
-    let home_hl = selected.is_some_and(|o| o.mv.is_bear_off());
+    let mine = app.game.turn() == player;
+    let anim = app.piece_animation().filter(|_| mine);
+    // While a piece animates, it has already left the waiting row, and a
+    // borne-off piece counts as home once it hops off the board.
+    let left_reserve = anim.is_some_and(|a| a.mv.is_entry());
+    let arrived_home = anim.is_some_and(|a| a.mv.is_bear_off() && a.pos == FINISH);
+    let waiting = app.game.waiting(player) - u8::from(left_reserve);
+    let finished = app.game.finished(player) + u8::from(arrived_home);
+    let target = app.selected_or_moving().filter(|_| mine);
+    let entry_hl = anim.is_none() && target.is_some_and(|o| o.mv.is_entry());
+    let home_hl = !arrived_home && target.is_some_and(|o| o.mv.is_bear_off());
     let active = app.game.turn() == player && !matches!(app.phase, Phase::GameOver(_));
 
     let name_style = if active {
@@ -310,10 +327,22 @@ struct BoardView<'a> {
 impl Widget for BoardView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let game: &GameState = &self.app.game;
-        let selected = self.app.selected_move();
         let mover = game.turn();
-        let from_cell = selected.and_then(|o| cell_of(mover, o.mv.from));
-        let to_cell = selected.and_then(|o| cell_of(mover, o.mv.to));
+        let anim = self.app.piece_animation();
+        // While choosing: highlight the selected piece and its destination.
+        let from_cell = self
+            .app
+            .selected_move()
+            .and_then(|o| cell_of(mover, o.mv.from));
+        // While animating: keep the destination marked until the piece lands.
+        let to_cell = self
+            .app
+            .selected_or_moving()
+            .filter(|_| !anim.is_some_and(|a| a.landed))
+            .and_then(|o| cell_of(mover, o.mv.to));
+        let hidden_cell = anim.and_then(|a| cell_of(mover, a.mv.from));
+        let moving_cell = anim.and_then(|a| cell_of(mover, a.pos));
+        let impact = anim.is_some_and(|a| a.impact);
 
         for row in 0..ROWS {
             for col in 0..COLS {
@@ -332,7 +361,11 @@ impl Widget for BoardView<'_> {
                 }
                 let here = Some((row, col));
                 let rosette = is_rosette_cell(row, col);
-                let (border_style, border_type) = if here == to_cell {
+                let (border_style, border_type) = if here == moving_cell && impact {
+                    (Style::new().fg(Color::LightRed).bold(), BorderType::Thick)
+                } else if here == moving_cell {
+                    (Style::new().fg(ACCENT).bold(), BorderType::Thick)
+                } else if here == to_cell {
                     (Style::new().fg(TARGET).bold(), BorderType::Thick)
                 } else if here == from_cell {
                     (Style::new().fg(ACCENT).bold(), BorderType::Thick)
@@ -359,24 +392,36 @@ impl Widget for BoardView<'_> {
                 let inner = block.inner(rect);
                 block.render(rect, buf);
 
-                let content = match game.piece_at_cell(row, col) {
+                // The animating piece has left its start square.
+                let occupant = game
+                    .piece_at_cell(row, col)
+                    .filter(|&p| !(p == mover && here == hidden_cell));
+                let mover_style = Style::new().fg(player_color(mover)).bold();
+                let content: Line = match occupant {
+                    _ if here == moving_cell && impact => Line::from(vec![
+                        Span::styled("⚔", Style::new().fg(Color::LightRed).bold()),
+                        Span::styled(PIECE, mover_style),
+                    ]),
+                    _ if here == moving_cell => Line::from(Span::styled(PIECE, mover_style)),
                     Some(p) if here == to_cell => {
                         // Capture preview: victim shown struck in the target colour.
-                        Span::styled(
+                        Line::from(Span::styled(
                             format!("{GHOST}{PIECE}"),
                             Style::new()
                                 .fg(player_color(p))
                                 .add_modifier(Modifier::CROSSED_OUT),
-                        )
+                        ))
                     }
-                    Some(p) => Span::styled(PIECE, Style::new().fg(player_color(p)).bold()),
-                    None if here == to_cell => {
-                        Span::styled(GHOST, Style::new().fg(player_color(mover)).bold())
+                    Some(p) => {
+                        Line::from(Span::styled(PIECE, Style::new().fg(player_color(p)).bold()))
                     }
-                    None if rosette => Span::styled(ROSETTE, Style::new().fg(ROSETTE_COLOR)),
-                    None => Span::raw(""),
+                    None if here == to_cell => Line::from(Span::styled(GHOST, mover_style)),
+                    None if rosette => {
+                        Line::from(Span::styled(ROSETTE, Style::new().fg(ROSETTE_COLOR)))
+                    }
+                    None => Line::from(""),
                 };
-                Paragraph::new(Line::from(content).centered()).render(inner, buf);
+                Paragraph::new(content.centered()).render(inner, buf);
             }
         }
     }
@@ -394,6 +439,45 @@ fn draw_dice(frame: &mut Frame, app: &App, area: Rect) {
     let block = panel("Dice");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    if let Some((tips, settled)) = app.tumbling_dice() {
+        let color = player_color(app.game.turn());
+        let dice: Vec<Span> = (0..4)
+            .flat_map(|i| {
+                let marked = tips & (1 << i) != 0;
+                let sym = match (marked, settled) {
+                    (true, _) => "▲",
+                    (false, true) => "△",
+                    // Mid-tumble, unmarked dice lie on their side.
+                    (false, false) => "◁",
+                };
+                let style = if marked {
+                    Style::new().fg(color).bold()
+                } else {
+                    Style::new().fg(DIM)
+                };
+                [Span::styled(sym, style), Span::raw("  ")]
+            })
+            .collect();
+        // A little bounce: the dice hop between the top two rows while tumbling.
+        let bounce = !settled && tips.count_ones() % 2 == 1;
+        let mut lines = vec![Line::from(dice).centered()];
+        if bounce {
+            lines.insert(0, Line::from(""));
+        }
+        let label = if settled {
+            format!("{}  {}", app.game.turn(), tips.count_ones())
+        } else {
+            "throwing…".to_string()
+        };
+        lines.push(
+            Line::from(label)
+                .fg(if settled { color } else { DIM })
+                .centered(),
+        );
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
 
     let text = match app.dice {
         None => Text::from(vec![
@@ -477,6 +561,10 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect) {
                 }
             })
             .collect(),
+        Phase::Moving { option, .. } => vec![
+            ListItem::new(format!("▶ {}", describe_move(option.mv)))
+                .style(Style::new().fg(Color::Black).bg(ACCENT)),
+        ],
         Phase::NoMoves { .. } => vec![ListItem::new("No legal move.").fg(DIM)],
         _ => vec![],
     };
@@ -641,18 +729,24 @@ mod tests {
         let mut now = Instant::now();
         app.new_game(now);
         app.show_help = false;
-        // Render every step of a full AI game at two sizes: must never panic.
-        for _ in 0..5000 {
+        // Render a full AI game, animations included, at two sizes: must
+        // never panic. Small time steps catch mid-animation frames.
+        let mut saw_rolling = false;
+        let mut saw_moving = false;
+        for _ in 0..20_000 {
+            saw_rolling |= matches!(app.phase, Phase::Rolling { .. });
+            saw_moving |= matches!(app.phase, Phase::Moving { .. });
             for (w, h) in [(MIN_W, MIN_H), (160, 50)] {
                 render(&app, w, h);
             }
             if matches!(app.phase, Phase::GameOver(_)) {
                 break;
             }
-            now += AI_DELAY * 2;
+            now += AI_DELAY / 4;
             app.update(now);
         }
         assert!(matches!(app.phase, Phase::GameOver(_)));
+        assert!(saw_rolling && saw_moving);
         assert!(render(&app, 120, 30).contains("wins!"));
     }
 
