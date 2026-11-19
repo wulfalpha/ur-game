@@ -316,8 +316,13 @@ impl GameState {
         if !self.legal_moves(roll).is_empty() {
             return Err(MoveError::MustMove);
         }
-        self.turn = self.turn.opponent();
+        self.pass_unchecked();
         Ok(())
+    }
+
+    /// Hand the turn to the opponent without checking for legal moves.
+    pub(crate) fn pass_unchecked(&mut self) {
+        self.turn = self.turn.opponent();
     }
 
     /// Play a move known to come from [`legal_moves`](Self::legal_moves).
