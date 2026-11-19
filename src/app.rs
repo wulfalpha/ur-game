@@ -213,6 +213,14 @@ impl App {
         }
     }
 
+    /// Number of moves to choose from (0 outside the choosing phase).
+    pub fn options_len(&self) -> usize {
+        match &self.phase {
+            Phase::Choosing { options, .. } => options.len(),
+            _ => 0,
+        }
+    }
+
     /// The highlighted move while choosing, or the move being animated.
     pub fn selected_or_moving(&self) -> Option<MoveOption> {
         match self.phase {

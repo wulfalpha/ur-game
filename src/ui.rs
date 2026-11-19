@@ -10,7 +10,7 @@ use ratatui::widgets::{
     Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Widget, Wrap,
 };
 use ur_game::game::{
-    COLS, FINISH, GameState, PIECES_PER_PLAYER, Player, ROWS, cell_of, is_board_cell,
+    COLS, FINISH, Move, PIECES_PER_PLAYER, Player, ROWS, START, cell_of, is_board_cell,
     is_rosette_cell, path_position,
 };
 
@@ -22,6 +22,36 @@ const SIDE_W: u16 = 32;
 pub const MIN_W: u16 = BOARD_W + SIDE_W + 2;
 pub const MIN_H: u16 = 22;
 
+// Landscape (compact) layout for short screens such as a phone on its side:
+// borderless coloured tiles instead of boxed squares.
+const TILE_W: u16 = 4;
+const TILE_GAP: u16 = 1;
+const TILE_H: u16 = 2;
+const TILE_BOARD_W: u16 = (TILE_W + TILE_GAP) * COLS as u16 - TILE_GAP;
+const TILE_BOARD_H: u16 = TILE_H * ROWS as u16;
+const COMPACT_SIDE_W: u16 = 26;
+pub const COMPACT_MIN_W: u16 = TILE_BOARD_W + COMPACT_SIDE_W + 1;
+pub const COMPACT_MIN_H: u16 = 12;
+
+/// Which layout fits the terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Boxed squares, roomy side panel.
+    Full,
+    /// Landscape: tile board, narrow side panel, short texts.
+    Compact,
+}
+
+pub fn mode_for(area: Rect) -> Option<Mode> {
+    if area.width >= MIN_W && area.height >= MIN_H {
+        Some(Mode::Full)
+    } else if area.width >= COMPACT_MIN_W && area.height >= COMPACT_MIN_H {
+        Some(Mode::Compact)
+    } else {
+        None
+    }
+}
+
 const PIECE: &str = "●";
 const GHOST: &str = "◌";
 const ROSETTE: &str = "✦";
@@ -32,6 +62,15 @@ const DIM: Color = Color::DarkGray;
 const BOARD_EDGE: Color = Color::Rgb(150, 110, 60); // lapis-and-shell boards had wooden frames
 const ROSETTE_COLOR: Color = Color::Rgb(70, 110, 200); // lapis lazuli
 
+// Tile backgrounds for the compact board.
+const TILE_A: Color = Color::Rgb(70, 50, 32);
+const TILE_B: Color = Color::Rgb(88, 64, 40);
+const TILE_ROSETTE: Color = Color::Rgb(28, 48, 115);
+const TILE_FROM: Color = Color::Rgb(125, 100, 15);
+const TILE_TO: Color = Color::Rgb(25, 100, 50);
+const TILE_IMPACT: Color = Color::Rgb(150, 30, 30);
+const TILE_NUMBER: Color = Color::Rgb(165, 145, 115);
+
 fn player_color(p: Player) -> Color {
     match p {
         Player::Light => Color::White,
@@ -41,20 +80,25 @@ fn player_color(p: Player) -> Color {
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    if area.width < MIN_W || area.height < MIN_H {
+    let Some(mode) = mode_for(area) else {
         let msg = format!(
-            "Terminal too small: {}×{}\nNeed at least {MIN_W}×{MIN_H}.\n\nq to quit",
+            "Terminal too small: {}×{}\n\nNeed {COMPACT_MIN_W}×{COMPACT_MIN_H} (landscape)\nor {MIN_W}×{MIN_H} (full).\n\nq to quit",
             area.width, area.height
         );
-        frame.render_widget(Paragraph::new(msg).alignment(Alignment::Center), area);
+        frame.render_widget(
+            Paragraph::new(msg)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            area,
+        );
         return;
-    }
+    };
     match app.screen {
         Screen::Menu => draw_menu(frame, app, area),
-        Screen::Game => draw_game(frame, app, area),
+        Screen::Game => draw_game(frame, app, area, mode),
     }
     if app.show_help {
-        draw_help(frame, area);
+        draw_help(frame, area, mode);
     }
 }
 
@@ -63,7 +107,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 // ---------------------------------------------------------------------------
 
 fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
-    let box_area = area.centered(Constraint::Length(56), Constraint::Length(21));
+    let box_area = area.centered(
+        Constraint::Length(56),
+        Constraint::Length(21.min(area.height)),
+    );
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BOARD_EDGE))
@@ -72,10 +119,13 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
 
+    // On short screens, drop the intro and board preview.
+    let roomy = inner.height >= 17;
+    let gap = |n| Constraint::Length(if roomy { n } else { 0 });
     let [intro, preview, _, items, _, hint] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(3),
-        Constraint::Length(1),
+        gap(2),
+        gap(3),
+        gap(1),
         Constraint::Length(5),
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -124,13 +174,13 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                     Line::from(vec![
                         Span::styled(cursor, style),
                         Span::styled(PIECE, Style::new().fg(player_color(p))),
-                        Span::styled(format!(" {:<7}", p.to_string()), style),
+                        Span::styled(format!(" {:<8}", p.to_string()), style),
                         Span::styled(format!("◀ {value:^18} ▶"), style),
                     ])
                 }
                 MenuItem::Animation => Line::from(vec![
                     Span::styled(cursor, style),
-                    Span::styled(format!("  {:<7}", "Animate"), style),
+                    Span::styled(format!("  {:<8}", "Animate"), style),
                     Span::styled(
                         format!("◀ {:^18} ▶", if app.animations { "On" } else { "Off" }),
                         style,
@@ -179,48 +229,67 @@ fn mini_row(left: &str, right: &str) -> Line<'static> {
 // Game screen
 // ---------------------------------------------------------------------------
 
-fn draw_game(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_game(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
     let [title, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
     .areas(area);
-    let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(SIDE_W)])
+    let (side_w, board_w, board_h, gap) = match mode {
+        Mode::Full => (SIDE_W, BOARD_W, BOARD_H, 1),
+        Mode::Compact => (COMPACT_SIDE_W, TILE_BOARD_W, TILE_BOARD_H, 0),
+    };
+    let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(side_w)])
         .spacing(1)
         .areas(body);
 
     frame.render_widget(status_line(app), title);
     frame.render_widget(Paragraph::new(footer_hint(app)).fg(DIM).centered(), footer);
 
-    // Board column, vertically centred.
-    let stack_h = BOARD_H + 4;
-    let col = left.centered(
-        Constraint::Length(BOARD_W.min(left.width)),
-        Constraint::Length(stack_h),
-    );
+    // Board column, vertically centred. Reserve lines may be wider than the
+    // board, so they get the whole column width.
+    let stack = left.centered_vertically(Constraint::Length(board_h + 2 + 2 * gap));
     let [light_res, _, board, _, dark_res] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(BOARD_H),
-        Constraint::Length(1),
+        Constraint::Length(gap),
+        Constraint::Length(board_h),
+        Constraint::Length(gap),
         Constraint::Length(1),
     ])
-    .areas(col);
-    frame.render_widget(reserve_line(app, Player::Light), light_res);
-    frame.render_widget(BoardView { app }, board);
-    frame.render_widget(reserve_line(app, Player::Dark), dark_res);
+    .areas(stack);
+    let board = board.centered_horizontally(Constraint::Length(board_w.min(left.width)));
+    let res_x = |r: Rect| Rect {
+        x: board.x,
+        width: left.right() - board.x,
+        ..r
+    };
+    frame.render_widget(reserve_line(app, Player::Light), res_x(light_res));
+    frame.render_widget(reserve_line(app, Player::Dark), res_x(dark_res));
+    match mode {
+        Mode::Full => frame.render_widget(BoardView { app }, board),
+        Mode::Compact => frame.render_widget(TileBoard { app }, board),
+    }
 
     // Side panel.
+    let (dice_h, moves_h) = match mode {
+        Mode::Full => (5, 9),
+        Mode::Compact => (3, (app.options_len().max(1) as u16 + 2).min(8)),
+    };
     let [dice_area, moves_area, log_area] = Layout::vertical([
-        Constraint::Length(5),
-        Constraint::Length(9),
+        Constraint::Length(dice_h),
+        Constraint::Length(moves_h),
         Constraint::Fill(1),
     ])
     .areas(right);
-    draw_dice(frame, app, dice_area);
-    draw_moves(frame, app, moves_area);
-    draw_log(frame, app, log_area);
+    match mode {
+        Mode::Full => draw_dice(frame, app, dice_area),
+        Mode::Compact => draw_dice_compact(frame, app, dice_area),
+    }
+    draw_moves(frame, app, moves_area, mode);
+    if log_area.height >= 3 {
+        draw_log(frame, app, log_area);
+    }
 }
 
 fn status_line(app: &App) -> Line<'static> {
@@ -320,30 +389,115 @@ fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
     Paragraph::new(Line::from(spans))
 }
 
+/// How one square should look, shared by both board renderers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CellView {
+    highlight: Highlight,
+    content: Content,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Highlight {
+    None,
+    /// The piece that will move (while choosing).
+    From,
+    /// Where the selected or animating piece will land.
+    To,
+    /// Where the animating piece is right now.
+    Moving,
+    /// The animating piece has landed on an enemy.
+    Impact,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Content {
+    Empty,
+    Rosette,
+    Piece(Player),
+    /// Destination of the selected move (empty square).
+    Ghost(Player),
+    /// Destination holds an enemy that would be captured.
+    Victim(Player),
+    /// The animating piece passing through or landing.
+    Mover(Player),
+    /// The animating piece striking an enemy.
+    Strike(Player),
+}
+
+fn cell_view(app: &App, row: usize, col: usize) -> CellView {
+    let game = &app.game;
+    let mover = game.turn();
+    let here = Some((row, col));
+    let anim = app.piece_animation();
+    let from_cell = app.selected_move().and_then(|o| cell_of(mover, o.mv.from));
+    let to_cell = app
+        .selected_or_moving()
+        .filter(|_| !anim.is_some_and(|a| a.landed))
+        .and_then(|o| cell_of(mover, o.mv.to));
+    let hidden_cell = anim.and_then(|a| cell_of(mover, a.mv.from));
+    let moving_cell = anim.and_then(|a| cell_of(mover, a.pos));
+    let impact = anim.is_some_and(|a| a.impact);
+
+    // The animating piece has left its start square.
+    let occupant = game
+        .piece_at_cell(row, col)
+        .filter(|&p| !(p == mover && here == hidden_cell));
+    let highlight = if here == moving_cell && impact {
+        Highlight::Impact
+    } else if here == moving_cell {
+        Highlight::Moving
+    } else if here == to_cell {
+        Highlight::To
+    } else if here == from_cell {
+        Highlight::From
+    } else {
+        Highlight::None
+    };
+    let content = match occupant {
+        _ if here == moving_cell && impact => Content::Strike(mover),
+        _ if here == moving_cell => Content::Mover(mover),
+        Some(p) if here == to_cell => Content::Victim(p),
+        Some(p) => Content::Piece(p),
+        None if here == to_cell => Content::Ghost(mover),
+        None if is_rosette_cell(row, col) => Content::Rosette,
+        None => Content::Empty,
+    };
+    CellView { highlight, content }
+}
+
+/// Path number shown on a square. The numbers are the same on both private
+/// rows and the shared row is common, so one label per square is unambiguous.
+fn square_number(row: usize, col: usize) -> Option<u8> {
+    path_position(Player::Light, row, col).or(path_position(Player::Dark, row, col))
+}
+
+fn content_line(content: Content) -> Line<'static> {
+    let piece = |p: Player| Style::new().fg(player_color(p)).bold();
+    match content {
+        Content::Empty => Line::from(""),
+        Content::Rosette => Line::from(Span::styled(ROSETTE, Style::new().fg(ROSETTE_COLOR))),
+        Content::Piece(p) | Content::Mover(p) => Line::from(Span::styled(PIECE, piece(p))),
+        Content::Ghost(p) => Line::from(Span::styled(GHOST, piece(p))),
+        Content::Victim(p) => Line::from(Span::styled(
+            format!("{GHOST}{PIECE}"),
+            Style::new()
+                .fg(player_color(p))
+                .add_modifier(Modifier::CROSSED_OUT),
+        )),
+        Content::Strike(p) => Line::from(vec![
+            Span::styled("⚔", Style::new().fg(Color::LightRed).bold()),
+            Span::styled(PIECE, piece(p)),
+        ]),
+    }
+}
+
+/// Full layout: each square is a small bordered box.
 struct BoardView<'a> {
     app: &'a App,
 }
 
 impl Widget for BoardView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let game: &GameState = &self.app.game;
-        let mover = game.turn();
-        let anim = self.app.piece_animation();
-        // While choosing: highlight the selected piece and its destination.
-        let from_cell = self
-            .app
-            .selected_move()
-            .and_then(|o| cell_of(mover, o.mv.from));
-        // While animating: keep the destination marked until the piece lands.
-        let to_cell = self
-            .app
-            .selected_or_moving()
-            .filter(|_| !anim.is_some_and(|a| a.landed))
-            .and_then(|o| cell_of(mover, o.mv.to));
-        let hidden_cell = anim.and_then(|a| cell_of(mover, a.mv.from));
-        let moving_cell = anim.and_then(|a| cell_of(mover, a.pos));
-        let impact = anim.is_some_and(|a| a.impact);
-
         for row in 0..ROWS {
             for col in 0..COLS {
                 if !is_board_cell(row, col) {
@@ -359,69 +513,80 @@ impl Widget for BoardView<'_> {
                 if rect.width < 3 || rect.height < 3 {
                     continue;
                 }
-                let here = Some((row, col));
-                let rosette = is_rosette_cell(row, col);
-                let (border_style, border_type) = if here == moving_cell && impact {
-                    (Style::new().fg(Color::LightRed).bold(), BorderType::Thick)
-                } else if here == moving_cell {
-                    (Style::new().fg(ACCENT).bold(), BorderType::Thick)
-                } else if here == to_cell {
-                    (Style::new().fg(TARGET).bold(), BorderType::Thick)
-                } else if here == from_cell {
-                    (Style::new().fg(ACCENT).bold(), BorderType::Thick)
-                } else if rosette {
-                    (Style::new().fg(ROSETTE_COLOR), BorderType::Double)
-                } else {
-                    (Style::new().fg(BOARD_EDGE), BorderType::Rounded)
+                let view = cell_view(self.app, row, col);
+                let (border_style, border_type) = match view.highlight {
+                    Highlight::Impact => {
+                        (Style::new().fg(Color::LightRed).bold(), BorderType::Thick)
+                    }
+                    Highlight::Moving | Highlight::From => {
+                        (Style::new().fg(ACCENT).bold(), BorderType::Thick)
+                    }
+                    Highlight::To => (Style::new().fg(TARGET).bold(), BorderType::Thick),
+                    Highlight::None if is_rosette_cell(row, col) => {
+                        (Style::new().fg(ROSETTE_COLOR), BorderType::Double)
+                    }
+                    Highlight::None => (Style::new().fg(BOARD_EDGE), BorderType::Rounded),
                 };
-                // Path numbers are the same on both private rows and the
-                // shared row is common, so one label per square is unambiguous.
-                let number = path_position(Player::Light, row, col).or(path_position(
-                    Player::Dark,
-                    row,
-                    col,
-                ));
+                let number = square_number(row, col).map_or(String::new(), |n| n.to_string());
                 let block = Block::bordered()
                     .border_type(border_type)
                     .border_style(border_style)
-                    .title_bottom(
-                        Line::from(number.map_or(String::new(), |n| n.to_string()))
-                            .fg(DIM)
-                            .right_aligned(),
-                    );
+                    .title_bottom(Line::from(number).fg(DIM).right_aligned());
                 let inner = block.inner(rect);
                 block.render(rect, buf);
+                Paragraph::new(content_line(view.content).centered()).render(inner, buf);
+            }
+        }
+    }
+}
 
-                // The animating piece has left its start square.
-                let occupant = game
-                    .piece_at_cell(row, col)
-                    .filter(|&p| !(p == mover && here == hidden_cell));
-                let mover_style = Style::new().fg(player_color(mover)).bold();
-                let content: Line = match occupant {
-                    _ if here == moving_cell && impact => Line::from(vec![
-                        Span::styled("⚔", Style::new().fg(Color::LightRed).bold()),
-                        Span::styled(PIECE, mover_style),
-                    ]),
-                    _ if here == moving_cell => Line::from(Span::styled(PIECE, mover_style)),
-                    Some(p) if here == to_cell => {
-                        // Capture preview: victim shown struck in the target colour.
-                        Line::from(Span::styled(
-                            format!("{GHOST}{PIECE}"),
-                            Style::new()
-                                .fg(player_color(p))
-                                .add_modifier(Modifier::CROSSED_OUT),
-                        ))
-                    }
-                    Some(p) => {
-                        Line::from(Span::styled(PIECE, Style::new().fg(player_color(p)).bold()))
-                    }
-                    None if here == to_cell => Line::from(Span::styled(GHOST, mover_style)),
-                    None if rosette => {
-                        Line::from(Span::styled(ROSETTE, Style::new().fg(ROSETTE_COLOR)))
-                    }
-                    None => Line::from(""),
+/// Compact layout: each square is a borderless coloured tile, 2 rows tall,
+/// path number on top and the piece below.
+struct TileBoard<'a> {
+    app: &'a App,
+}
+
+impl Widget for TileBoard<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        for row in 0..ROWS {
+            for col in 0..COLS {
+                if !is_board_cell(row, col) {
+                    continue;
+                }
+                let rect = Rect::new(
+                    area.x + col as u16 * (TILE_W + TILE_GAP),
+                    area.y + row as u16 * TILE_H,
+                    TILE_W,
+                    TILE_H,
+                )
+                .intersection(area);
+                if rect.width < TILE_W || rect.height < TILE_H {
+                    continue;
+                }
+                let view = cell_view(self.app, row, col);
+                let bg = match view.highlight {
+                    Highlight::Impact => TILE_IMPACT,
+                    Highlight::Moving | Highlight::From => TILE_FROM,
+                    Highlight::To => TILE_TO,
+                    Highlight::None if is_rosette_cell(row, col) => TILE_ROSETTE,
+                    // Checkerboard shading keeps adjacent tiles distinct.
+                    Highlight::None if (row + col) % 2 == 0 => TILE_A,
+                    Highlight::None => TILE_B,
                 };
-                Paragraph::new(content.centered()).render(inner, buf);
+                buf.set_style(rect, Style::new().bg(bg));
+                let number = square_number(row, col).map_or(String::new(), |n| n.to_string());
+                let [top, bottom] =
+                    Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(rect);
+                Paragraph::new(Line::from(number).fg(TILE_NUMBER)).render(top, buf);
+                let content = match view.content {
+                    // Brighter star so it reads on the lapis tile.
+                    Content::Rosette => Line::from(Span::styled(
+                        ROSETTE,
+                        Style::new().fg(Color::Rgb(150, 180, 245)),
+                    )),
+                    c => content_line(c),
+                };
+                Paragraph::new(content.centered()).render(bottom, buf);
             }
         }
     }
@@ -531,7 +696,72 @@ fn draw_dice(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(text), inner);
 }
 
-fn draw_moves(frame: &mut Frame, app: &App, area: Rect) {
+/// One-line dice readout for the compact layout: "▲ ▲ △ △  2".
+fn draw_dice_compact(frame: &mut Frame, app: &App, area: Rect) {
+    let block = panel("Dice");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (tips, color, value) = match (app.tumbling_dice(), app.dice) {
+        (Some((tips, settled)), _) => {
+            let color = player_color(app.game.turn());
+            (tips, color, settled.then(|| tips.count_ones() as u8))
+        }
+        (
+            None,
+            Some(Dice {
+                player,
+                tips,
+                value,
+            }),
+        ) => {
+            let stale = matches!(app.phase, Phase::AwaitRoll);
+            (
+                tips,
+                if stale { DIM } else { player_color(player) },
+                Some(value),
+            )
+        }
+        (None, None) => {
+            frame.render_widget(Paragraph::new("Space to throw").fg(DIM).centered(), inner);
+            return;
+        }
+    };
+    let mut spans: Vec<Span> = (0..4)
+        .map(|i| {
+            if tips & (1 << i) != 0 {
+                Span::styled("▲ ", Style::new().fg(color).bold())
+            } else {
+                Span::styled("△ ", Style::new().fg(DIM))
+            }
+        })
+        .collect();
+    spans.push(match value {
+        Some(v) => Span::styled(format!(" {v}"), Style::new().fg(color).bold()),
+        None => Span::styled(" …", Style::new().fg(DIM)),
+    });
+    frame.render_widget(Paragraph::new(Line::from(spans).centered()), inner);
+}
+
+/// Short move label for narrow panels: "new → 3", "5 → 9", "13 → off".
+fn short_move(mv: Move) -> String {
+    let from = if mv.from == START {
+        "new".to_string()
+    } else {
+        mv.from.to_string()
+    };
+    let to = if mv.to == FINISH {
+        "off".to_string()
+    } else {
+        mv.to.to_string()
+    };
+    format!("{from} → {to}")
+}
+
+fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
+    let describe = |mv: Move| match mode {
+        Mode::Full => describe_move(mv),
+        Mode::Compact => short_move(mv),
+    };
     let block = panel("Moves");
     let items: Vec<ListItem> = match &app.phase {
         Phase::Choosing {
@@ -540,10 +770,7 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect) {
             .iter()
             .enumerate()
             .map(|(i, o)| {
-                let mut spans = vec![
-                    Span::raw(format!("{} ", i + 1)),
-                    Span::raw(describe_move(o.mv)),
-                ];
+                let mut spans = vec![Span::raw(format!("{} ", i + 1)), Span::raw(describe(o.mv))];
                 if o.outcome.captured {
                     spans.push(Span::styled(" ⚔", Style::new().fg(Color::LightRed).bold()));
                 }
@@ -562,7 +789,7 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect) {
             })
             .collect(),
         Phase::Moving { option, .. } => vec![
-            ListItem::new(format!("▶ {}", describe_move(option.mv)))
+            ListItem::new(format!("▶ {}", describe(option.mv)))
                 .style(Style::new().fg(Color::Black).bg(ACCENT)),
         ],
         Phase::NoMoves { .. } => vec![ListItem::new("No legal move.").fg(DIM)],
@@ -638,14 +865,36 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
 // Help overlay
 // ---------------------------------------------------------------------------
 
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame, area: Rect, mode: Mode) {
     let popup = area.centered(
         Constraint::Length(74.min(area.width)),
         Constraint::Length(24.min(area.height)),
     );
     frame.render_widget(Clear, popup);
     let h = |s: &'static str| Line::from(s).fg(ACCENT).bold();
-    let text = vec![
+    let short = vec![
+        Line::from("Race all 7 pieces along your path and off the board."),
+        Line::from(vec![
+            Span::styled("Path ", Style::new().fg(ACCENT).bold()),
+            Span::raw(
+                "your row 1–4 (left), middle row 5–12 (right), your row 13–14, then off with an exact throw.",
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Dice ", Style::new().fg(ACCENT).bold()),
+            Span::raw("count the marked tips, 0–4. 2 is the most likely."),
+        ]),
+        Line::from("You must move if you can. No move, or a 0: turn passes."),
+        Line::from(vec![
+            Span::styled("⚔ ", Style::new().fg(Color::LightRed).bold()),
+            Span::raw("Land on an enemy in the middle row to send it back."),
+        ]),
+        Line::from(vec![
+            Span::styled("✦ ", Style::new().fg(ROSETTE_COLOR).bold()),
+            Span::raw("Rosettes give another throw; the middle one is safe."),
+        ]),
+    ];
+    let full = vec![
         h("Goal"),
         Line::from("Be the first to move all 7 of your pieces along your path and off the board."),
         Line::from(""),
@@ -672,6 +921,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             Span::raw("Throw again. The middle rosette is also safe from capture."),
         ]),
     ];
+    let text = match mode {
+        Mode::Full => full,
+        Mode::Compact => short,
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BOARD_EDGE))
@@ -758,6 +1011,71 @@ mod tests {
         assert_eq!(
             word_wrap("Light rolls 2 → 3", 40),
             vec!["Light rolls 2 → 3"]
+        );
+    }
+
+    #[test]
+    fn picks_layout_by_size() {
+        let r = |w, h| Rect::new(0, 0, w, h);
+        assert_eq!(mode_for(r(MIN_W, MIN_H)), Some(Mode::Full));
+        assert_eq!(mode_for(r(200, 60)), Some(Mode::Full));
+        // Phone in landscape: wide but short.
+        assert_eq!(mode_for(r(100, 16)), Some(Mode::Compact));
+        assert_eq!(
+            mode_for(r(COMPACT_MIN_W, COMPACT_MIN_H)),
+            Some(Mode::Compact)
+        );
+        // Narrow but tall also falls back to compact.
+        assert_eq!(mode_for(r(70, 40)), Some(Mode::Compact));
+        assert_eq!(mode_for(r(COMPACT_MIN_W - 1, 30)), None);
+        assert_eq!(mode_for(r(100, COMPACT_MIN_H - 1)), None);
+    }
+
+    #[test]
+    fn compact_layout_renders_a_whole_game() {
+        let ai = Controller::Computer(Difficulty::Easy);
+        let mut app = App::new(4);
+        app.controllers = [ai, ai];
+        let mut now = Instant::now();
+        app.new_game(now);
+        for _ in 0..20_000 {
+            for (w, h) in [(COMPACT_MIN_W, COMPACT_MIN_H), (100, 16), (70, 40)] {
+                render(&app, w, h);
+            }
+            if matches!(app.phase, Phase::GameOver(_)) {
+                break;
+            }
+            now += AI_DELAY / 4;
+            app.update(now);
+        }
+        assert!(matches!(app.phase, Phase::GameOver(_)));
+        let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
+        assert!(out.contains("wins!"));
+        // Path numbers are on the tiles.
+        assert!(out.contains("14") && out.contains("12"));
+    }
+
+    #[test]
+    fn compact_menu_and_help_fit() {
+        let mut app = App::new(0);
+        let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
+        assert!(out.contains("Start game") && out.contains("Quit"));
+        assert!(out.contains("Royal Game of Ur"));
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')), Instant::now());
+        let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
+        assert!(out.contains("Rosettes give another throw"), "{out}");
+    }
+
+    #[test]
+    fn short_move_labels() {
+        assert_eq!(short_move(Move { from: START, to: 3 }), "new → 3");
+        assert_eq!(short_move(Move { from: 5, to: 9 }), "5 → 9");
+        assert_eq!(
+            short_move(Move {
+                from: 13,
+                to: FINISH
+            }),
+            "13 → off"
         );
     }
 
