@@ -123,14 +123,16 @@ animations off there.
 | Key           | What it does                              |
 |---------------|-------------------------------------------|
 | Space / Enter | Throw the dice, play the highlighted move |
-| ← → / Tab     | Choose between moves                      |
+| r             | Throw the dice                            |
+| ← → ↑ ↓ / Tab / Shift+Tab | Choose between moves          |
 | 1–9           | Play that move from the list straight away|
 | h             | Hint: show which move the Hard AI would play |
-| Space         | Skip an animation, or hurry the computer  |
+| Space / Enter | Skip an animation, or hurry the computer  |
+| n             | Start a new game once one has finished    |
 | m             | Toggle sound                              |
 | + / -         | Raise / lower sound volume                |
-| ?             | Show the rules                            |
-| Esc           | Back to the menu                          |
+| ? / F1        | Show the rules                            |
+| Esc           | Back to the menu (quits from the menu)    |
 | q / Ctrl+C    | Quit                                      |
 
 When you choose a move, the piece that will move is highlighted in gold
@@ -168,8 +170,9 @@ the menu offers **Continue**. The throw is saved before you see it, so
 quitting and coming back won't give you a different roll. A finished game
 removes the save.
 
-Saves go in `~/.local/share/ur-game` on Linux and
-`~/Library/Application Support/ur-game` on macOS.
+Saves go in `~/.local/share/ur-game` on Linux (or under `$XDG_DATA_HOME`),
+`~/Library/Application Support/ur-game` on macOS, and
+`%LOCALAPPDATA%\ur-game` on Windows.
 
 ### Preferences
 
@@ -202,7 +205,7 @@ cargo run --release -- --light human --dark hard --start
 | `--no-save`          | Don't save, and ignore any saved game                |
 | `--no-animation`     | Turn off the dice and piece animations               |
 | `--mute`             | Start with sound muted; press M to enable it          |
-| `--seed NUMBER`      | Replay the same dice throws                          |
+| `--seed NUMBER`      | Replay the same dice throws (and Random's moves)     |
 | `--tui`              | Play in the terminal instead of a window             |
 | `--gui`              | Open a window even over SSH                          |
 
