@@ -2,6 +2,7 @@
 
 use crate::app::{App, Controller};
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 use std::time::Instant;
 use ur_game::ai::Difficulty;
 
@@ -21,9 +22,18 @@ pub struct Cli {
     #[arg(short, long, value_enum, value_name = "PLAYER", default_value_t = Seat::Medium)]
     pub dark: Seat,
 
-    /// Skip the menu and start a game straight away.
+    /// Skip the menu and start a new game straight away.
     #[arg(short, long)]
     pub start: bool,
+
+    /// Skip the menu and continue the saved game (or start a new one if
+    /// there isn't one). The saved game keeps its own players.
+    #[arg(short = 'c', long = "continue", conflicts_with = "start")]
+    pub resume: bool,
+
+    /// Don't save the game, and ignore any saved game.
+    #[arg(long, conflicts_with = "resume")]
+    pub no_save: bool,
 
     /// Turn off the dice and piece animations.
     #[arg(long)]
@@ -59,12 +69,19 @@ impl From<Seat> for Controller {
 
 impl Cli {
     /// Build the app these options describe. `default_seed` is used when no
-    /// `--seed` was given.
-    pub fn into_app(self, default_seed: u64, now: Instant) -> App {
+    /// `--seed` was given; games are saved to `save_path` unless `--no-save`.
+    pub fn into_app(self, default_seed: u64, now: Instant, save_path: Option<PathBuf>) -> App {
         let mut app = App::new(self.seed.unwrap_or(default_seed));
         app.controllers = [self.light.into(), self.dark.into()];
         app.animations = !self.no_animation;
-        if self.start {
+        if let Some(path) = save_path.filter(|_| !self.no_save) {
+            app.use_save_file(path);
+        }
+        if self.resume {
+            if !app.resume(now) {
+                app.new_game(now);
+            }
+        } else if self.start {
             app.new_game(now);
         }
         app
@@ -88,7 +105,7 @@ mod tests {
 
     #[test]
     fn defaults_match_the_menu() {
-        let app = parse(&[]).into_app(1, Instant::now());
+        let app = parse(&[]).into_app(1, Instant::now(), None);
         assert_eq!(app.screen, Screen::Menu);
         assert_eq!(
             app.controllers,
@@ -112,7 +129,7 @@ mod tests {
         ]);
         assert!(cli.tui);
         assert_eq!(cli.seed, Some(7));
-        let app = cli.into_app(1, Instant::now());
+        let app = cli.into_app(1, Instant::now(), None);
         assert_eq!(app.screen, Screen::Game);
         assert_eq!(
             app.controllers,
@@ -134,7 +151,7 @@ mod tests {
                 "--seed",
                 seed,
             ])
-            .into_app(0, Instant::now());
+            .into_app(0, Instant::now(), None);
             let mut app = app;
             let mut now = Instant::now();
             for _ in 0..40 {
@@ -145,6 +162,52 @@ mod tests {
         };
         assert_eq!(throws("42"), throws("42"));
         assert_ne!(throws("42"), throws("43"));
+    }
+
+    #[test]
+    fn continue_resumes_the_saved_game() {
+        let path = std::env::temp_dir().join(format!("ur-game-cli-{}.txt", std::process::id()));
+        // First run: a computer-vs-computer game, played a few turns, then
+        // abandoned.
+        let mut app = parse(&["-l", "easy", "-d", "hard", "-s", "--no-animation"]).into_app(
+            9,
+            Instant::now(),
+            Some(path.clone()),
+        );
+        let mut now = Instant::now();
+        for _ in 0..12 {
+            now += crate::app::PASS_DELAY;
+            app.update(now);
+        }
+        let saved = app.resumable.clone().expect("saved during play");
+
+        // Second run, with different players on the command line: the saved
+        // game's players win.
+        let app = parse(&["-c"]).into_app(1, Instant::now(), Some(path.clone()));
+        assert_eq!(app.screen, Screen::Game);
+        assert_eq!(app.game, saved.game);
+        assert_eq!(app.controllers, saved.controllers);
+
+        // --no-save ignores it; a plain run offers it in the menu.
+        let app = parse(&["--no-save"]).into_app(1, Instant::now(), Some(path.clone()));
+        assert!(app.resumable.is_none());
+        let app = parse(&[]).into_app(1, Instant::now(), Some(path.clone()));
+        assert_eq!(app.menu_selected, crate::app::MenuItem::Continue);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn continue_without_a_save_starts_fresh() {
+        let path = std::env::temp_dir().join("ur-game-cli-missing-save.txt");
+        let app = parse(&["-c"]).into_app(1, Instant::now(), Some(path));
+        assert_eq!(app.screen, Screen::Game);
+        assert_eq!(app.game, ur_game::game::GameState::new());
+    }
+
+    #[test]
+    fn rejects_conflicting_options() {
+        assert!(Cli::try_parse_from(["ur-game", "-c", "-s"]).is_err());
+        assert!(Cli::try_parse_from(["ur-game", "-c", "--no-save"]).is_err());
     }
 
     #[test]

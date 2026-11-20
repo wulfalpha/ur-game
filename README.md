@@ -60,8 +60,8 @@ the middle rosette, is shared by both players.
 
 ## The pieces
 
-Each player has seven pieces. In the game Light's are white circles `●` and
-Dark's are red diamonds `◆`. Light moves first.
+Each player has seven pieces, shown as `●`: white for Light and dark red for
+Dark. Light moves first.
 
 Pieces wait off the board until they enter, and are counted as home once
 they have been moved off the far end. The rows above and below the board
@@ -116,6 +116,17 @@ When you ask for a hint, the cursor jumps to the Hard AI's choice, marked
 roughly one point per square of progress, so −2.5 is about two and a half
 squares worse. Hints are noted in the log.
 
+### Saving
+
+The game saves itself at the start of every turn and whenever the dice are
+thrown, so you can quit (or lose your connection) at any point. Next time,
+the menu offers **Continue**. The throw is saved before you see it, so
+quitting and coming back won't give you a different roll. A finished game
+removes the save.
+
+Saves go in `~/.local/share/ur-game` on Linux and
+`~/Library/Application Support/ur-game` on macOS.
+
 ### Command-line options
 
 Options are passed after `--` when using `cargo run`:
@@ -128,13 +139,16 @@ cargo run --release -- --light human --dark hard --start
 |----------------------|------------------------------------------------------|
 | `-l, --light PLAYER` | Who plays Light, who moves first (default: `human`)  |
 | `-d, --dark PLAYER`  | Who plays Dark (default: `medium`)                   |
-| `-s, --start`        | Skip the menu and start a game straight away         |
+| `-s, --start`        | Skip the menu and start a new game straight away     |
+| `-c, --continue`     | Skip the menu and continue the saved game            |
+| `--no-save`          | Don't save, and ignore any saved game                |
 | `--no-animation`     | Turn off the dice and piece animations               |
 | `--seed NUMBER`      | Replay the same dice throws                          |
 | `--tui`              | Use the terminal interface (currently the only one)  |
 
 `PLAYER` is one of `human`, `random`, `easy`, `medium` or `hard`. Set both
-sides to computer players to watch them play each other.
+sides to computer players to watch them play each other. A continued game
+keeps the players it was started with.
 
 ## The computer players
 
@@ -168,6 +182,7 @@ cargo run --release --example arena 400
 | `src/ai.rs`        | The computer players                                      |
 | `src/app.rs`       | Game flow for the terminal version: menu, turns, input    |
 | `src/cli.rs`       | Command-line options                                      |
+| `src/save.rs`      | Saving and resuming a game                                |
 | `src/ui.rs`        | Drawing the terminal screens                              |
 | `src/main.rs`      | Starts the terminal app                                   |
 | `examples/arena.rs`| Computer-vs-computer matches                              |

@@ -52,22 +52,9 @@ pub fn mode_for(area: Rect) -> Option<Mode> {
     }
 }
 
-/// Each side has its own shape as well as colour, so the pieces stay easy
-/// to tell apart whatever the terminal's palette (or the player's eyes).
-fn piece(p: Player) -> &'static str {
-    match p {
-        Player::Light => "●",
-        Player::Dark => "◆",
-    }
-}
-
+const PIECE: &str = "●";
 /// Outline of a piece: where a moving piece will land, or has just left.
-fn ghost(p: Player) -> &'static str {
-    match p {
-        Player::Light => "○",
-        Player::Dark => "◇",
-    }
-}
+const GHOST: &str = "○";
 const ROSETTE: &str = "✦";
 
 const ACCENT: Color = Color::Yellow;
@@ -87,10 +74,10 @@ const TILE_NUMBER: Color = Color::Rgb(165, 145, 115);
 
 fn player_color(p: Player) -> Color {
     match p {
-        // Shell-white and deep red, given as RGB so terminal themes can't
+        // Shell-white and dark red, given as RGB so terminal themes can't
         // wash them out to similar pastels.
         Player::Light => Color::Rgb(245, 238, 220),
-        Player::Dark => Color::Rgb(230, 45, 45),
+        Player::Dark => Color::Rgb(141, 0, 23),
     }
 }
 
@@ -142,7 +129,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
         gap(2),
         gap(3),
         gap(1),
-        Constraint::Length(5),
+        Constraint::Length(MenuItem::ALL.len() as u16),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
@@ -168,11 +155,11 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
         preview,
     );
 
-    let lines: Vec<Line> = MenuItem::ALL
+    let lines: Vec<Line> = app
+        .menu_items()
         .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let selected = i == app.menu_selected;
+        .map(|item| {
+            let selected = *item == app.menu_selected;
             let cursor = if selected { "▶ " } else { "  " };
             let style = if selected {
                 Style::new().fg(ACCENT).bold()
@@ -189,7 +176,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                     let value = app.controller(p).label();
                     Line::from(vec![
                         Span::styled(cursor, style),
-                        Span::styled(piece(p), Style::new().fg(player_color(p))),
+                        Span::styled(PIECE, Style::new().fg(player_color(p))),
                         Span::styled(format!(" {:<8}", p.to_string()), style),
                         Span::styled(format!("◀ {value:^18} ▶"), style),
                     ])
@@ -202,7 +189,21 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                         style,
                     ),
                 ]),
-                MenuItem::Start => Line::from(Span::styled(format!("{cursor}Start game"), style)),
+                MenuItem::Continue => {
+                    let name = |c: Controller| match c {
+                        Controller::Human => "Human".to_string(),
+                        Controller::Computer(d) => d.to_string(),
+                    };
+                    let [light, dark] = app
+                        .resumable
+                        .as_ref()
+                        .map_or(app.controllers, |s| s.controllers);
+                    Line::from(Span::styled(
+                        format!("{cursor}Continue ({} vs {})", name(light), name(dark)),
+                        style,
+                    ))
+                }
+                MenuItem::Start => Line::from(Span::styled(format!("{cursor}New game"), style)),
                 MenuItem::Quit => Line::from(Span::styled(format!("{cursor}Quit"), style)),
             }
         })
@@ -311,14 +312,14 @@ fn draw_game(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
 fn status_line(app: &App) -> Line<'static> {
     let turn = app.game.turn();
     let who = Span::styled(
-        format!("{} {turn}", piece(turn)),
+        format!("{PIECE} {turn}"),
         Style::new().fg(player_color(turn)).bold(),
     );
     let tail = match &app.phase {
         Phase::GameOver(w) => {
             return Line::from(vec![
                 Span::styled(
-                    format!("{} {w} wins!", piece(*w)),
+                    format!("{PIECE} {w} wins!"),
                     Style::new().fg(player_color(*w)).bold(),
                 ),
                 Span::raw("  Enter for a rematch, Esc for the menu"),
@@ -346,7 +347,7 @@ fn footer_hint(app: &App) -> &'static str {
     }
 }
 
-/// "Light  ●●●●●  ⟶  home ●●" (Dark uses ◆)
+/// "Light  ●●●●●  ⟶  home ●●"
 fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
     let color = player_color(player);
     let mine = app.game.turn() == player;
@@ -379,7 +380,7 @@ fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
                 } else {
                     Style::new().fg(color)
                 };
-                Span::styled(piece(player), style)
+                Span::styled(PIECE, style)
             })
             .collect();
         if n == 0 {
@@ -396,7 +397,7 @@ fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
     spans.push(Span::styled("  ⟶  home ", Style::new().fg(DIM)));
     spans.extend(pieces(finished, false));
     if home_hl {
-        spans.push(Span::styled(ghost(player), Style::new().fg(TARGET).bold()));
+        spans.push(Span::styled(GHOST, Style::new().fg(TARGET).bold()));
     }
     spans.push(Span::styled(
         format!(" {finished}/{PIECES_PER_PLAYER}"),
@@ -492,17 +493,17 @@ fn content_line(content: Content) -> Line<'static> {
     match content {
         Content::Empty => Line::from(""),
         Content::Rosette => Line::from(Span::styled(ROSETTE, Style::new().fg(ROSETTE_COLOR))),
-        Content::Piece(p) | Content::Mover(p) => Line::from(Span::styled(piece(p), style(p))),
-        Content::Ghost(p) => Line::from(Span::styled(ghost(p), style(p))),
+        Content::Piece(p) | Content::Mover(p) => Line::from(Span::styled(PIECE, style(p))),
+        Content::Ghost(p) => Line::from(Span::styled(GHOST, style(p))),
         Content::Victim(p) => Line::from(Span::styled(
-            format!("{}{}", ghost(p), piece(p)),
+            format!("{GHOST}{PIECE}"),
             Style::new()
                 .fg(player_color(p))
                 .add_modifier(Modifier::CROSSED_OUT),
         )),
         Content::Strike(p) => Line::from(vec![
             Span::styled("⚔", Style::new().fg(Color::LightRed).bold()),
-            Span::styled(piece(p), style(p)),
+            Span::styled(PIECE, style(p)),
         ]),
     }
 }
@@ -988,7 +989,7 @@ mod tests {
     fn renders_menu() {
         let out = render(&App::new(0), 100, 30);
         assert!(out.contains("Royal Game of Ur"));
-        assert!(out.contains("Start game"));
+        assert!(out.contains("New game"));
     }
 
     #[test]
@@ -1082,8 +1083,17 @@ mod tests {
     fn compact_menu_and_help_fit() {
         let mut app = App::new(0);
         let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
-        assert!(out.contains("Start game") && out.contains("Quit"));
+        assert!(out.contains("New game") && out.contains("Quit"));
         assert!(out.contains("Royal Game of Ur"));
+        // With a game to continue, all six rows still fit.
+        app.controllers[1] = Controller::Computer(Difficulty::Hard);
+        app.new_game(Instant::now());
+        app.handle_key(KeyEvent::from(KeyCode::Esc), Instant::now());
+        for size in [(COMPACT_MIN_W, COMPACT_MIN_H), (MIN_W, MIN_H)] {
+            let out = render(&app, size.0, size.1);
+            assert!(out.contains("▶ Continue (Human vs Hard)"), "{out}");
+            assert!(out.contains("Quit"), "{out}");
+        }
         app.handle_key(KeyEvent::from(KeyCode::Char('?')), Instant::now());
         let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
         assert!(out.contains("Rosettes give another throw"), "{out}");

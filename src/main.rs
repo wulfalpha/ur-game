@@ -2,6 +2,7 @@
 
 mod app;
 mod cli;
+mod save;
 mod ui;
 
 use app::App;
@@ -24,7 +25,7 @@ fn main() -> io::Result<()> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x5EED);
-    let mut app = cli.into_app(seed, Instant::now());
+    let mut app = cli.into_app(seed, Instant::now(), save::default_path());
     ratatui::run(|terminal| run(terminal, &mut app))
 }
 

@@ -8,9 +8,11 @@
 //! presentational: the throw and the move are decided up front, and the
 //! game state only changes once the animation has finished.
 
+use crate::save::{self, SavedGame};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use ur_game::ai::{self, Difficulty};
 use ur_game::game::{FINISH, GameState, Move, Outcome, Player, START, roll_from_tips};
@@ -69,6 +71,8 @@ pub enum Screen {
 /// Rows of the start menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
+    /// Only shown when there is a game to resume.
+    Continue,
     Light,
     Dark,
     Animation,
@@ -77,7 +81,8 @@ pub enum MenuItem {
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 5] = [
+    pub const ALL: [MenuItem; 6] = [
+        MenuItem::Continue,
         MenuItem::Light,
         MenuItem::Dark,
         MenuItem::Animation,
@@ -154,7 +159,7 @@ pub enum Phase {
 
 pub struct App {
     pub screen: Screen,
-    pub menu_selected: usize,
+    pub menu_selected: MenuItem,
     pub controllers: [Controller; 2],
     pub game: GameState,
     pub phase: Phase,
@@ -168,6 +173,12 @@ pub struct App {
     pub animations: bool,
     /// Time of the latest input or update; animations are drawn relative to it.
     pub now: Instant,
+    /// The game in progress (or saved from an earlier run) that "Continue"
+    /// resumes. Kept up to date at every save point.
+    pub resumable: Option<SavedGame>,
+    /// Where to save; `None` keeps saves in memory only.
+    save_path: Option<PathBuf>,
+    save_failed: bool,
     deadline: Option<Instant>,
     rng: StdRng,
 }
@@ -176,10 +187,7 @@ impl App {
     pub fn new(seed: u64) -> Self {
         App {
             screen: Screen::Menu,
-            menu_selected: MenuItem::ALL
-                .iter()
-                .position(|&m| m == MenuItem::Start)
-                .unwrap(),
+            menu_selected: MenuItem::Start,
             controllers: [Controller::Human, Controller::Computer(Difficulty::Medium)],
             game: GameState::new(),
             phase: Phase::AwaitRoll,
@@ -190,9 +198,29 @@ impl App {
             should_quit: false,
             animations: true,
             now: Instant::now(),
+            resumable: None,
+            save_path: None,
+            save_failed: false,
             deadline: None,
             rng: StdRng::seed_from_u64(seed),
         }
+    }
+
+    /// Save games to `path`, and offer to continue the game saved there.
+    pub fn use_save_file(&mut self, path: PathBuf) {
+        self.resumable = save::load(&path);
+        self.save_path = Some(path);
+        if self.resumable.is_some() {
+            self.menu_selected = MenuItem::Continue;
+        }
+    }
+
+    /// The menu rows currently shown.
+    pub fn menu_items(&self) -> Vec<MenuItem> {
+        MenuItem::ALL
+            .into_iter()
+            .filter(|&m| m != MenuItem::Continue || self.resumable.is_some())
+            .collect()
     }
 
     /// When the app next wants [`update`](Self::update) called, if ever.
@@ -321,14 +349,17 @@ impl App {
     }
 
     fn menu_key(&mut self, code: KeyCode, now: Instant) {
-        let n = MenuItem::ALL.len();
-        let item = MenuItem::ALL[self.menu_selected];
+        let items = self.menu_items();
+        let n = items.len();
+        let i = items
+            .iter()
+            .position(|&m| m == self.menu_selected)
+            .unwrap_or(0);
+        let item = items[i];
         match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.menu_selected = (self.menu_selected + n - 1) % n
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.menu_selected = items[(i + n - 1) % n],
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                self.menu_selected = (self.menu_selected + 1) % n
+                self.menu_selected = items[(i + 1) % n]
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter => {
                 let step = if code == KeyCode::Left { -1 } else { 1 };
@@ -336,6 +367,9 @@ impl App {
                     MenuItem::Light => self.controllers[0] = self.controllers[0].cycle(step),
                     MenuItem::Dark => self.controllers[1] = self.controllers[1].cycle(step),
                     MenuItem::Animation => self.animations = !self.animations,
+                    MenuItem::Continue if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) => {
+                        self.resume(now);
+                    }
                     MenuItem::Start if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) => {
                         self.new_game(now)
                     }
@@ -354,6 +388,9 @@ impl App {
         if code == KeyCode::Esc {
             self.screen = Screen::Menu;
             self.deadline = None;
+            if self.resumable.is_some() {
+                self.menu_selected = MenuItem::Continue;
+            }
             return;
         }
         let human = self.current_is_human();
@@ -463,13 +500,35 @@ impl App {
         self.start_turn(now);
     }
 
+    /// Pick up the saved game. Returns `false` if there is none.
+    pub fn resume(&mut self, now: Instant) -> bool {
+        let Some(saved) = self.resumable.clone() else {
+            return false;
+        };
+        self.screen = Screen::Game;
+        self.controllers = saved.controllers;
+        self.game = saved.game;
+        self.log = saved.log;
+        self.dice = None;
+        self.hint = None;
+        match saved.pending_tips {
+            // The dice were already thrown: show the same throw again.
+            Some(tips) => self.resolve_roll(tips, now),
+            None => self.start_turn(now),
+        }
+        true
+    }
+
     fn start_turn(&mut self, now: Instant) {
         self.phase = Phase::AwaitRoll;
         self.deadline = (!self.current_is_human()).then(|| now + AI_DELAY);
+        self.autosave(None);
     }
 
     fn roll(&mut self, now: Instant) {
         let tips = (self.rng.next_u32() & 0b1111) as u8;
+        // Saved before anyone sees it, so quitting can't undo a bad throw.
+        self.autosave(Some(tips));
         if self.animations {
             self.phase = Phase::Rolling { tips, started: now };
             self.deadline = Some(now + DICE_ROLL_TIME);
@@ -600,6 +659,7 @@ impl App {
             self.push_log(format!("{winner} wins the game!"));
             self.phase = Phase::GameOver(winner);
             self.deadline = None;
+            self.clear_save();
         } else {
             self.start_turn(now);
         }
@@ -611,6 +671,33 @@ impl App {
         };
         self.game.pass(roll).expect("no legal moves");
         self.start_turn(now);
+    }
+
+    /// Record the game as it stands (with a throw not yet played, if any).
+    fn autosave(&mut self, pending_tips: Option<u8>) {
+        let saved = SavedGame {
+            controllers: self.controllers,
+            game: self.game,
+            pending_tips,
+            log: self.log.clone(),
+        };
+        if let Some(path) = &self.save_path
+            && let Err(e) = save::store(path, &saved)
+            && !self.save_failed
+        {
+            // Say so once; the game itself carries on fine.
+            self.save_failed = true;
+            self.push_log(format!("Couldn't save the game: {e}."));
+        }
+        self.resumable = Some(saved);
+    }
+
+    fn clear_save(&mut self) {
+        self.resumable = None;
+        if let Some(path) = &self.save_path {
+            // A stale save would only offer a finished game; nothing to do.
+            let _ = save::remove(path);
+        }
     }
 
     fn push_log(&mut self, line: String) {
@@ -959,5 +1046,97 @@ mod tests {
             Instant::now(),
         );
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn menu_offers_continue_only_with_a_game_to_resume() {
+        let mut app = App::new(1);
+        let now = Instant::now();
+        assert!(!app.menu_items().contains(&MenuItem::Continue));
+        app.handle_key(key(KeyCode::Enter), now); // New game
+        assert!(app.resumable.is_some(), "saved at the start of the turn");
+        app.handle_key(key(KeyCode::Esc), now);
+        assert_eq!(app.screen, Screen::Menu);
+        assert_eq!(app.menu_items()[0], MenuItem::Continue);
+        assert_eq!(app.menu_selected, MenuItem::Continue);
+        // Navigation wraps through the extra row.
+        app.handle_key(key(KeyCode::Up), now);
+        assert_eq!(app.menu_selected, MenuItem::Quit);
+        app.handle_key(key(KeyCode::Down), now);
+        assert_eq!(app.menu_selected, MenuItem::Continue);
+    }
+
+    #[test]
+    fn resuming_after_a_throw_shows_the_same_throw() {
+        let (mut app, now) = game_app(Controller::Human, Controller::Human);
+        app.animations = true;
+        app.handle_key(key(KeyCode::Char(' ')), now); // throw: dice tumbling
+        let Phase::Rolling { tips, .. } = app.phase else {
+            panic!("expected rolling")
+        };
+        assert_eq!(app.resumable.as_ref().unwrap().pending_tips, Some(tips));
+        let log = app.log.clone();
+
+        // Quit mid-tumble, come back: the same throw is waiting.
+        app.handle_key(key(KeyCode::Esc), now);
+        app.handle_key(key(KeyCode::Enter), now); // Continue
+        assert_eq!(app.screen, Screen::Game);
+        assert_eq!(app.dice.unwrap().tips, tips);
+        let resumed_phase_ok = matches!(app.phase, Phase::Choosing { .. } | Phase::NoMoves { .. });
+        assert!(resumed_phase_ok, "{:?}", app.phase);
+        assert!(app.log.starts_with(&log));
+    }
+
+    #[test]
+    fn resuming_between_turns_waits_for_a_throw() {
+        let (mut app, now) = human_app_with_position([3, 0, 0, 0, 0, 0, 0], [6, 0, 0, 0, 0, 0, 0]);
+        app.animations = false;
+        force_roll(&mut app, 2, now);
+        app.handle_key(key(KeyCode::Enter), now); // play 3 → 5
+        let game = app.game;
+        assert_eq!(game.turn(), Player::Dark);
+        app.handle_key(key(KeyCode::Esc), now);
+        app.controllers = [Controller::Computer(Difficulty::Easy); 2]; // menu fiddling
+        app.handle_key(key(KeyCode::Enter), now);
+        assert_eq!(app.game, game);
+        assert_eq!(app.phase, Phase::AwaitRoll);
+        assert_eq!(
+            app.controllers,
+            [Controller::Human; 2],
+            "saved players kept"
+        );
+    }
+
+    #[test]
+    fn winning_clears_the_save() {
+        let (mut app, now) = human_app_with_position([13, 15, 15, 15, 15, 15, 15], [0; 7]);
+        app.animations = false;
+        app.autosave(None);
+        assert!(app.resumable.is_some());
+        force_roll(&mut app, 2, now);
+        app.handle_key(key(KeyCode::Enter), now);
+        assert_eq!(app.phase, Phase::GameOver(Player::Light));
+        assert!(app.resumable.is_none());
+        app.handle_key(key(KeyCode::Esc), now);
+        assert!(!app.menu_items().contains(&MenuItem::Continue));
+    }
+
+    #[test]
+    fn saves_to_disk_and_reloads() {
+        let path = std::env::temp_dir().join(format!("ur-game-app-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App::new(4);
+        app.use_save_file(path.clone());
+        app.controllers = [Controller::Human, Controller::Computer(Difficulty::Hard)];
+        app.animations = false;
+        let now = Instant::now();
+        app.new_game(now);
+        app.handle_key(key(KeyCode::Char(' ')), now);
+
+        let mut again = App::new(5);
+        again.use_save_file(path.clone());
+        assert_eq!(again.resumable, app.resumable);
+        assert_eq!(again.menu_selected, MenuItem::Continue);
+        std::fs::remove_file(path).unwrap();
     }
 }
