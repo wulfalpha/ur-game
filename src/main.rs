@@ -4,6 +4,7 @@
 mod app;
 mod cli;
 mod gui;
+mod preferences;
 mod save;
 mod sound;
 mod tui;
@@ -23,7 +24,12 @@ fn main() -> io::Result<()> {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x5EED);
     let start = Instant::now();
-    let app = cli.into_app(seed, start.elapsed(), save::default_path());
+    let app = cli.into_app_with_preferences(
+        seed,
+        start.elapsed(),
+        save::default_path(),
+        preferences::default_path(),
+    );
     if terminal {
         tui::run(app, start)
     } else {

@@ -8,6 +8,7 @@
 //! presentational: the throw and the move are decided up front, and the
 //! game state only changes once the animation has finished.
 
+use crate::preferences::{self, Preferences};
 use crate::save::{self, SavedGame};
 use crate::sound::Cue;
 use rand::rngs::StdRng;
@@ -192,6 +193,9 @@ pub struct App {
     /// resumes. Kept up to date at every save point.
     pub resumable: Option<SavedGame>,
     /// Where to save; `None` keeps saves in memory only.
+    preferences_path: Option<PathBuf>,
+    preferences: Preferences,
+    preferences_failed: bool,
     save_path: Option<PathBuf>,
     save_failed: bool,
     deadline: Option<Time>,
@@ -218,10 +222,38 @@ impl App {
             sound_step: 0,
             now: Time::ZERO,
             resumable: None,
+            preferences_path: None,
+            preferences: Preferences::default(),
+            preferences_failed: false,
             save_path: None,
             save_failed: false,
             deadline: None,
             rng: StdRng::seed_from_u64(seed),
+        }
+    }
+
+    pub fn use_preferences(&mut self, path: PathBuf) {
+        let saved = preferences::load(&path);
+        self.sound_enabled = saved.sound;
+        self.sound_volume = saved.volume;
+        self.animations = saved.animations;
+        self.preferences = saved;
+        self.preferences_path = Some(path);
+    }
+
+    /// Only explicit UI changes update saved preferences. CLI overrides stay
+    /// temporary, including when the user adjusts a different preference.
+    fn save_preferences(&mut self) {
+        let Some(path) = &self.preferences_path else {
+            return;
+        };
+        if preferences::store(path, self.preferences).is_err() {
+            if !self.preferences_failed {
+                self.push_log("Could not save preferences; changes apply for this session.".into());
+            }
+            self.preferences_failed = true;
+        } else {
+            self.preferences_failed = false;
         }
     }
 
@@ -384,6 +416,8 @@ impl App {
         match key.code {
             KeyCode::Char('m') => {
                 self.sound_enabled = !self.sound_enabled;
+                self.preferences.sound = self.sound_enabled;
+                self.save_preferences();
                 self.sound_cues.clear();
                 return;
             }
@@ -394,6 +428,8 @@ impl App {
                     0.1
                 };
                 self.sound_volume = (self.sound_volume + delta).clamp(0.0, 1.0);
+                self.preferences.volume = self.sound_volume;
+                self.save_preferences();
                 return;
             }
             KeyCode::Char('?') | KeyCode::F(1) => {
@@ -436,7 +472,11 @@ impl App {
                 match item {
                     MenuItem::Light => self.controllers[0] = self.controllers[0].cycle(step),
                     MenuItem::Dark => self.controllers[1] = self.controllers[1].cycle(step),
-                    MenuItem::Animation => self.animations = !self.animations,
+                    MenuItem::Animation => {
+                        self.animations = !self.animations;
+                        self.preferences.animations = self.animations;
+                        self.save_preferences();
+                    }
                     MenuItem::Continue if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) => {
                         self.resume(now);
                     }

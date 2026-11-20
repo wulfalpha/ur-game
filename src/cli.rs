@@ -86,11 +86,29 @@ impl Cli {
 
     /// Build the app these options describe. `default_seed` is used when no
     /// `--seed` was given; games are saved to `save_path` unless `--no-save`.
+    #[cfg(test)]
     pub fn into_app(self, default_seed: u64, now: Time, save_path: Option<PathBuf>) -> App {
+        self.into_app_with_preferences(default_seed, now, save_path, None)
+    }
+
+    pub fn into_app_with_preferences(
+        self,
+        default_seed: u64,
+        now: Time,
+        save_path: Option<PathBuf>,
+        preferences_path: Option<PathBuf>,
+    ) -> App {
         let mut app = App::new(self.seed.unwrap_or(default_seed));
+        if let Some(path) = preferences_path {
+            app.use_preferences(path);
+        }
         app.controllers = [self.light.into(), self.dark.into()];
-        app.animations = !self.no_animation;
-        app.sound_enabled = !self.mute;
+        if self.no_animation {
+            app.animations = false;
+        }
+        if self.mute {
+            app.sound_enabled = false;
+        }
         if let Some(path) = save_path.filter(|_| !self.no_save) {
             app.use_save_file(path);
         }
