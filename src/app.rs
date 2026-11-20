@@ -184,6 +184,8 @@ pub struct App {
     pub sound_enabled: bool,
     pub sound_volume: f32,
     pub sound_cues: Vec<Cue>,
+    /// Last completed animation step whose sound was handled.
+    sound_step: u8,
     /// Time of the latest input or update; animations are drawn relative to it.
     pub now: Time,
     /// The game in progress (or saved from an earlier run) that "Continue"
@@ -213,6 +215,7 @@ impl App {
             sound_enabled: true,
             sound_volume: 0.5,
             sound_cues: Vec::new(),
+            sound_step: 0,
             now: Time::ZERO,
             resumable: None,
             save_path: None,
@@ -410,6 +413,12 @@ impl App {
     }
 
     fn menu_key(&mut self, code: KeyCode, now: Time) {
+        let before = (
+            self.menu_selected,
+            self.controllers,
+            self.animations,
+            self.screen,
+        );
         let items = self.menu_items();
         let n = items.len();
         let i = items
@@ -442,6 +451,15 @@ impl App {
             }
             KeyCode::Esc => self.should_quit = true,
             _ => {}
+        }
+        let after = (
+            self.menu_selected,
+            self.controllers,
+            self.animations,
+            self.screen,
+        );
+        if before != after {
+            self.cue(Cue::Menu);
         }
     }
 
@@ -523,9 +541,52 @@ impl App {
         if self.screen != Screen::Game || self.show_help {
             return;
         }
+        self.movement_sound(now, false);
         if self.deadline.is_some_and(|d| now >= d) {
             self.deadline = None;
             self.advance(now);
+        }
+    }
+
+    /// Emit at most one hop per update; delayed frames never replay a burst.
+    /// Final effects follow physical arrival, before the post-move pause.
+    fn movement_sound(&mut self, now: Time, finish: bool) {
+        let Phase::Moving {
+            option, started, ..
+        } = self.phase
+        else {
+            return;
+        };
+        let steps = option.mv.to - option.mv.from;
+        let reached = if finish {
+            steps
+        } else {
+            (now.saturating_sub(started).as_millis() / STEP_TIME.as_millis()).min(u128::from(steps))
+                as u8
+        };
+        if reached <= self.sound_step {
+            return;
+        }
+        self.sound_step = reached;
+        if reached == steps {
+            self.landing_sound(option);
+        } else {
+            self.cue(Cue::Hop);
+        }
+    }
+
+    fn landing_sound(&mut self, option: MoveOption) {
+        self.cue(if option.outcome.captured {
+            Cue::Capture
+        } else if option.mv.is_bear_off() {
+            Cue::Home
+        } else {
+            Cue::Move
+        });
+        if option.outcome.winner.is_some() {
+            self.cue(Cue::Victory);
+        } else if option.outcome.extra_turn {
+            self.cue(Cue::Rosette);
         }
     }
 
@@ -660,6 +721,7 @@ impl App {
             return;
         };
         self.hint = None;
+        self.sound_step = 0;
         if self.animations {
             self.phase = Phase::Moving {
                 roll,
@@ -707,15 +769,10 @@ impl App {
             .game
             .apply(roll, mv)
             .expect("move came from legal_moves");
-        self.cue(if outcome.captured {
-            Cue::Capture
+        if matches!(self.phase, Phase::Moving { .. }) {
+            self.movement_sound(now, true);
         } else {
-            Cue::Move
-        });
-        if outcome.winner.is_some() {
-            self.cue(Cue::Victory);
-        } else if outcome.extra_turn {
-            self.cue(Cue::Rosette);
+            self.landing_sound(option);
         }
         let mut text = format!("{player} rolls {roll}: {}", describe_move(mv));
         if outcome.captured {
@@ -824,6 +881,77 @@ mod tests {
         let now = Time::ZERO;
         app.new_game(now);
         (app, now)
+    }
+
+    #[test]
+    fn animated_sound_follows_arrival_without_duplicates_or_catchup_bursts() {
+        let (mut app, now) = game_app(Controller::Human, Controller::Human);
+        app.animations = true;
+        app.resolve_roll(0b1111, now);
+        app.play(0, now);
+        app.update(STEP_TIME);
+        assert_eq!(std::mem::take(&mut app.sound_cues), vec![Cue::Hop]);
+        app.update(STEP_TIME);
+        assert!(app.sound_cues.is_empty());
+        app.update(STEP_TIME * 3);
+        assert_eq!(std::mem::take(&mut app.sound_cues), vec![Cue::Hop]);
+        app.update(STEP_TIME * 4);
+        assert_eq!(
+            std::mem::take(&mut app.sound_cues),
+            vec![Cue::Move, Cue::Rosette]
+        );
+        app.update(Time::from_secs(1));
+        assert!(app.sound_cues.is_empty());
+    }
+
+    #[test]
+    fn skipping_a_move_plays_landing_once_without_intermediate_hops() {
+        let (mut app, now) = game_app(Controller::Human, Controller::Human);
+        app.animations = true;
+        app.resolve_roll(0b1111, now);
+        app.play(0, now);
+        app.handle_key(key(KeyCode::Enter), now);
+        assert_eq!(
+            std::mem::take(&mut app.sound_cues),
+            vec![Cue::Move, Cue::Rosette]
+        );
+        app.update(Time::from_secs(1));
+        assert!(app.sound_cues.is_empty());
+    }
+
+    #[test]
+    fn bearing_off_has_a_home_cue_and_winning_adds_victory() {
+        for winning in [false, true] {
+            let (mut app, now) = game_app(Controller::Human, Controller::Human);
+            let mut light = if winning { [FINISH; 7] } else { [START; 7] };
+            light[0] = 14;
+            app.game = GameState::from_positions(Player::Light, light, [START; 7]).unwrap();
+            app.resolve_roll(1, now);
+            let off = app
+                .options()
+                .iter()
+                .position(|o| o.mv.is_bear_off())
+                .unwrap();
+            app.play(off, now);
+            let expected = if winning {
+                vec![Cue::Home, Cue::Victory]
+            } else {
+                vec![Cue::Home]
+            };
+            assert_eq!(app.sound_cues, expected);
+        }
+    }
+
+    #[test]
+    fn menu_ticks_only_when_keyboard_input_changes_something() {
+        let mut app = App::new(9);
+        app.handle_key(key(KeyCode::Char('x')), Time::ZERO);
+        assert!(app.sound_cues.is_empty());
+        app.handle_key(key(KeyCode::Up), Time::ZERO);
+        assert_eq!(std::mem::take(&mut app.sound_cues), vec![Cue::Menu]);
+        app.handle_key(key(KeyCode::Char('m')), Time::ZERO);
+        app.handle_key(key(KeyCode::Down), Time::ZERO);
+        assert!(app.sound_cues.is_empty());
     }
 
     #[test]

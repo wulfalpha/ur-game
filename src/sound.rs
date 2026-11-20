@@ -9,6 +9,9 @@ pub enum Cue {
     Capture,
     Rosette,
     Victory,
+    Hop,
+    Home,
+    Menu,
 }
 
 pub struct Audio {
@@ -51,6 +54,9 @@ impl Audio {
                 &include_bytes!("../assets/sounds/capture.wav")[..],
                 &include_bytes!("../assets/sounds/rosette.wav")[..],
                 &include_bytes!("../assets/sounds/victory.wav")[..],
+                &include_bytes!("../assets/sounds/hop.wav")[..],
+                &include_bytes!("../assets/sounds/home.wav")[..],
+                &include_bytes!("../assets/sounds/menu.wav")[..],
             ]
             .into_iter()
             .map(|bytes| Sound::load(&ctx, bytes))
@@ -68,6 +74,9 @@ impl Audio {
                 Cue::Capture => 2,
                 Cue::Rosette => 3,
                 Cue::Victory => 4,
+                Cue::Hop => 5,
+                Cue::Home => 6,
+                Cue::Menu => 7,
             };
             self.sounds[index].play(
                 ctx,
