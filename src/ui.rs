@@ -1,6 +1,8 @@
 //! Rendering. Reads `App`, never mutates it.
 
-use crate::app::{App, Controller, Dice, MenuItem, Phase, Screen, describe_move, risk_percent};
+use crate::app::{
+    App, Controller, Dice, MenuItem, Phase, Screen, describe_move, entry_player, risk_percent,
+};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -9,6 +11,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Widget, Wrap,
 };
+use ur_game::ai::Difficulty;
 use ur_game::game::{
     COLS, FINISH, Move, PIECES_PER_PLAYER, Player, ROWS, START, cell_of, is_board_cell,
     is_rosette_cell, path_position,
@@ -107,6 +110,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Menu => draw_menu(frame, app, area),
         Screen::Game => draw_game(frame, app, area, mode),
+        Screen::Leaderboard => draw_leaderboard(frame, app, area),
     }
     if app.show_help {
         draw_help(frame, area, mode);
@@ -218,6 +222,9 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                     ))
                 }
                 MenuItem::Start => Line::from(Span::styled(format!("{cursor}New game"), style)),
+                MenuItem::Leaderboard => {
+                    Line::from(Span::styled(format!("{cursor}Leaderboard"), style))
+                }
                 MenuItem::Quit => Line::from(Span::styled(format!("{cursor}Quit"), style)),
             }
         })
@@ -233,6 +240,72 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
             .fg(DIM),
         hint,
     );
+}
+
+/// "██████░░░░" for a percentage.
+fn bar(percent: u32, width: usize) -> String {
+    let filled = (percent as usize * width + 50) / 100;
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
+    let box_area = area.centered(
+        Constraint::Length(56.min(area.width)),
+        Constraint::Length(13.min(area.height)),
+    );
+    let block = Block::bordered()
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(BOARD_EDGE))
+        .style(Style::new().bg(PANEL).fg(TEXT))
+        .title(Line::from(" ✦ Leaderboard ✦ ").fg(ACCENT).bold().centered())
+        .title_bottom(Line::from(" Enter / Esc back ").fg(DIM).centered())
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+
+    let row = |name: &str, r: crate::stats::Record, style: Style| {
+        let (won, lost, pct, meter) = match r.win_percent() {
+            Some(p) => (
+                r.won.to_string(),
+                r.lost().to_string(),
+                format!("{p}%"),
+                bar(p, 10),
+            ),
+            None => ("–".into(), "–".into(), "–".into(), String::new()),
+        };
+        Line::from(vec![
+            Span::styled(
+                format!("{name:<9}{:>7}{won:>6}{lost:>6}{pct:>7}  ", r.played),
+                style,
+            ),
+            Span::styled(meter, Style::new().fg(ACCENT)),
+        ])
+    };
+    let mut lines = vec![
+        Line::from("You against the computer").fg(DIM).centered(),
+        Line::from(""),
+        Line::from(format!(
+            "{:<9}{:>7}{:>6}{:>6}{:>7}",
+            "Opponent", "Played", "Won", "Lost", "Win %"
+        ))
+        .fg(ACCENT)
+        .bold(),
+    ];
+    for level in Difficulty::ALL {
+        lines.push(row(
+            &level.to_string(),
+            app.leaderboard.record(level),
+            Style::new(),
+        ));
+    }
+    lines.push(row("Total", app.leaderboard.total(), Style::new().bold()));
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from("Finished games against a computer player count.")
+            .fg(DIM)
+            .centered(),
+    );
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn mini_row(left: &str, right: &str) -> Line<'static> {
@@ -352,10 +425,10 @@ fn status_line(app: &App) -> Line<'static> {
 
 fn footer_hint(app: &App) -> &'static str {
     match &app.phase {
-        Phase::GameOver(_) => "Enter/n rematch · Esc menu · q quit",
+        Phase::GameOver(_) => "Enter/n rematch · e share · [ ] scroll · Esc menu · q quit",
         Phase::Rolling { .. } | Phase::Moving { .. } => "Space skip · Esc menu · ? rules · q quit",
         _ if !app.current_is_human() => "Space hurry · Esc menu · ? rules · q quit",
-        Phase::AwaitRoll => "Space roll · M sound · +/- volume · Esc menu · ? rules",
+        Phase::AwaitRoll => "Space roll · e share · [ ] scroll · M sound · Esc menu · ? rules",
         Phase::Choosing { .. } => "←→ select · Enter play · 1-9 pick · h hint · ? rules · Esc menu",
         Phase::NoMoves { .. } => "Space continue · Esc menu · ? rules",
     }
@@ -857,26 +930,43 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
 }
 
 fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
-    let block = panel("Chronicle");
+    let title = if app.log_scroll > 0 {
+        format!("Chronicle ↑{}", app.log_scroll)
+    } else {
+        "Chronicle".to_string()
+    };
+    let mut block = panel(&title);
+    if app.log_scroll > 0 {
+        block = block.title_bottom(Line::from(" ] newer ").fg(DIM).right_aligned());
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    // Word-wrap each entry, then keep as many of the newest lines as fit,
-    // so the latest event is always visible at the bottom.
+    // Word-wrap each entry, then keep as many lines as fit, ending at the
+    // newest entry (or where the reader has scrolled back to).
     let width = inner.width as usize;
+    let shown = &app.log[..app.log.len() - app.log_scroll.min(app.log.len())];
     let mut lines: Vec<Line> = Vec::new();
-    for (i, entry) in app.log.iter().enumerate() {
+    for (i, entry) in shown.iter().enumerate() {
         let newest = i + 1 == app.log.len();
         let style = if newest {
             Style::new()
         } else {
             Style::new().fg(DIM)
         };
+        // The bullet takes the colour of the player the entry is about.
+        let bullet = match entry_player(entry) {
+            Some(p) => Style::new().fg(player_color(p)),
+            None => Style::new().fg(ACCENT),
+        };
         for (j, chunk) in word_wrap(entry, width.saturating_sub(2))
             .into_iter()
             .enumerate()
         {
             let prefix = if j == 0 { "• " } else { "  " };
-            lines.push(Line::from(format!("{prefix}{chunk}")).style(style));
+            lines.push(Line::from(vec![
+                Span::styled(prefix, bullet),
+                Span::styled(chunk, style),
+            ]));
         }
     }
     let start = lines.len().saturating_sub(inner.height as usize);
@@ -1109,6 +1199,27 @@ mod tests {
         app.show_help = true;
         let out = render(&app, MIN_W, MIN_H);
         assert!(out.contains("⚠ Risk"), "{out}");
+    }
+
+    #[test]
+    fn leaderboard_screen_fits_and_shows_records() {
+        let mut app = App::new(0);
+        app.leaderboard.add(Difficulty::Easy, true);
+        app.leaderboard.add(Difficulty::Easy, false);
+        app.leaderboard.add(Difficulty::Easy, true);
+        app.screen = Screen::Leaderboard;
+        for (w, h) in [(COMPACT_MIN_W, COMPACT_MIN_H), (MIN_W, MIN_H)] {
+            let out = render(&app, w, h);
+            assert!(out.contains("Leaderboard"), "{out}");
+            assert!(out.contains("Easy           3     2     1    67%"), "{out}");
+            assert!(out.contains("Medium         0     –     –      –"), "{out}");
+            assert!(out.contains("Total          3"), "{out}");
+            assert!(out.contains("Enter / Esc back"), "{out}");
+        }
+        // The menu still fits all seven rows on the smallest screen.
+        app.screen = Screen::Menu;
+        let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
+        assert!(out.contains("Leaderboard") && out.contains("Quit"), "{out}");
     }
 
     #[test]

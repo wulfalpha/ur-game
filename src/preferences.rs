@@ -98,7 +98,8 @@ mod tests {
         let original = Preferences::default();
         store(&path, original).unwrap();
         let cli = Cli::parse_from(["ur-game", "--mute", "--no-animation", "--no-save"]);
-        let mut app = cli.into_app_with_preferences(9, Time::ZERO, None, Some(path.clone()));
+        let mut app =
+            cli.into_app_with_preferences(9, Time::ZERO, None, Some(path.clone()), None, None);
         assert!(!app.sound_enabled && !app.animations);
         assert_eq!(load(&path), original);
 

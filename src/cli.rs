@@ -88,7 +88,7 @@ impl Cli {
     /// `--seed` was given; games are saved to `save_path` unless `--no-save`.
     #[cfg(test)]
     pub fn into_app(self, default_seed: u64, now: Time, save_path: Option<PathBuf>) -> App {
-        self.into_app_with_preferences(default_seed, now, save_path, None)
+        self.into_app_with_preferences(default_seed, now, save_path, None, None, None)
     }
 
     pub fn into_app_with_preferences(
@@ -97,10 +97,20 @@ impl Cli {
         now: Time,
         save_path: Option<PathBuf>,
         preferences_path: Option<PathBuf>,
+        stats_path: Option<PathBuf>,
+        chronicle_dir: Option<PathBuf>,
     ) -> App {
         let mut app = App::new(self.seed.unwrap_or(default_seed));
         if let Some(path) = preferences_path {
             app.use_preferences(path);
+        }
+        // The leaderboard and shared chronicles are kept even with
+        // --no-save, which only affects the game in progress.
+        if let Some(path) = stats_path {
+            app.use_stats_file(path);
+        }
+        if let Some(dir) = chronicle_dir {
+            app.use_chronicle_dir(dir);
         }
         app.controllers = [self.light.into(), self.dark.into()];
         if self.no_animation {

@@ -24,7 +24,8 @@ Both interfaces use a palette of midnight lapis, gold, shell, and carnelian.
 The window has decorated tiles, inlaid rosettes, detailed pieces, and framed
 panels. The terminal carries the same style into shaded board cells and
 double-bordered panels, with a compact layout for smaller screens.
-The **Chronicle** records throws, moves, captures, and hints.
+The **Chronicle** records every numbered throw, move, capture, and hint,
+sums up the game at the end, and can be shared as a text file.
 
 ## The rules
 
@@ -129,6 +130,9 @@ animations off there.
 | h             | Hint: show which move the Hard AI would play |
 | Space / Enter | Skip an animation, or hurry the computer  |
 | n             | Start a new game once one has finished    |
+| e             | Share the Chronicle (file + clipboard)    |
+| PgUp/PgDn, [ ] | Scroll the Chronicle back and forward    |
+| End           | Jump back to the newest Chronicle entry   |
 | m             | Toggle sound                              |
 | + / -         | Raise / lower sound volume                |
 | ? / F1        | Show the rules                            |
@@ -175,6 +179,32 @@ shared by the GUI and TUI. Changes made with the sound keys, sound button,
 or animation menu row are saved immediately. The CLI flags `--mute` and
 `--no-animation` override preferences for the current run; they do not change
 your saved defaults.
+
+### The Chronicle
+
+The Chronicle keeps the whole game. Throws are numbered (both players
+counted together), and each entry's bullet takes the colour of the player
+it's about. Scroll back with PgUp/PgDn or `[` and `]` (or the mouse wheel
+in the window); new entries don't move you while you're reading.
+
+When a game ends, the Chronicle sums it up: how many throws each player
+had and their average, captures, rosettes, and any hints used.
+
+Press **e** (or click **Share** in the window) to share the game. The whole
+Chronicle, with a short header naming the players and the result, is saved
+as a text file and copied to the clipboard. Files go in a `chronicles`
+folder beside the saved game, named by date and time (UTC). In the terminal
+the copy uses OSC 52, which reaches your own clipboard even over SSH in
+terminals that allow it; on a local Mac it uses `pbcopy` as well.
+
+### Leaderboard
+
+**Leaderboard** in the menu shows how you've done against each computer
+level: games played, won and lost, and your win percentage. Every finished
+game between a human and a computer player counts, by the computer's
+level. Games between two humans or two computers, and games left
+unfinished, don't count. The leaderboard is kept in `stats.txt` beside the
+saved game, and `--no-save` doesn't affect it.
 
 ### Saving
 
@@ -264,6 +294,8 @@ cargo run --release --example arena 400
 | `src/preferences.rs` | Loading and saving sound, volume, and animation preferences |
 | `src/sound.rs`     | Shared audio playback and embedded sound effects          |
 | `src/save.rs`      | Saving and resuming a game                                |
+| `src/stats.rs`     | The local leaderboard                                     |
+| `src/chronicle.rs` | Sharing the Chronicle as a file and on the clipboard      |
 | `src/gui.rs`       | The window version, drawn with macroquad                  |
 | `src/tui.rs`       | The terminal version's main loop                          |
 | `src/ui.rs`        | Drawing the terminal screens                              |

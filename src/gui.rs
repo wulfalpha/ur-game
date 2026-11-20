@@ -7,7 +7,7 @@
 //! Everything is laid out on a virtual 1280×720 landscape canvas and scaled
 //! to fit the window, so the game looks the same at any size.
 
-use crate::app::{App, MenuItem, MoveOption, Phase, Screen, Time, risk_percent};
+use crate::app::{App, MenuItem, MoveOption, Phase, Screen, Time, entry_player, risk_percent};
 use macroquad::prelude::*;
 
 use ratatui::crossterm::event::{KeyCode as Key, KeyEvent, KeyModifiers};
@@ -137,6 +137,10 @@ async fn main_loop(mut app: App) {
         match app.screen {
             Screen::Menu => ui.menu(&mut app, now),
             Screen::Game => ui.game(&mut app, now),
+            Screen::Leaderboard => ui.leaderboard(&mut app, now),
+        }
+        if let Some(text) = app.clipboard.take() {
+            macroquad::miniquad::window::clipboard_set(&text);
         }
         if app.show_help {
             ui.help(&mut app, click && help_open);
@@ -162,6 +166,9 @@ fn handle_keys(app: &mut App, now: Time) {
             KeyCode::Tab if shift => Key::BackTab,
             KeyCode::Tab => Key::Tab,
             KeyCode::F1 => Key::F(1),
+            KeyCode::PageUp => Key::PageUp,
+            KeyCode::PageDown => Key::PageDown,
+            KeyCode::End => Key::End,
             _ => continue,
         };
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE), now);
@@ -526,8 +533,8 @@ impl Ui<'_> {
         );
 
         let items = app.menu_items();
-        let row_h = 52.0;
-        let top = 300.0 + (6 - items.len()) as f32 * row_h / 2.0;
+        let row_h = 46.0;
+        let top = 300.0 + (MenuItem::ALL.len() - items.len()) as f32 * row_h / 2.0;
         for (i, &item) in items.iter().enumerate() {
             let (rx, ry, rw) = (x + 60.0, top + i as f32 * row_h, w - 120.0);
             let selected = app.menu_selected == item;
@@ -579,7 +586,7 @@ impl Ui<'_> {
                         press(app, code, now);
                     }
                 }
-                MenuItem::Continue | MenuItem::Start | MenuItem::Quit => {
+                MenuItem::Continue | MenuItem::Start | MenuItem::Leaderboard | MenuItem::Quit => {
                     let label = match item {
                         MenuItem::Continue => {
                             let saved = app.resumable.as_ref().map(|s| s.controllers);
@@ -591,6 +598,7 @@ impl Ui<'_> {
                             format!("Continue ({} vs {})", name(l), name(d))
                         }
                         MenuItem::Start => "New game".to_string(),
+                        MenuItem::Leaderboard => "Leaderboard".to_string(),
                         _ => "Quit".to_string(),
                     };
                     if self.button(&label, rx, ry, rw, row_h - 8.0, selected) {
@@ -656,7 +664,7 @@ impl Ui<'_> {
         self.board_input(app, now);
         self.dice(app, now);
         self.moves(app, now);
-        self.log(app);
+        self.log(app, now);
         self.footer(app);
         self.top_buttons(app, now);
         if let Phase::GameOver(winner) = app.phase {
@@ -1082,15 +1090,38 @@ impl Ui<'_> {
         }
     }
 
-    fn log(&self, app: &App) {
+    fn log(&self, app: &mut App, now: Time) {
         let (x, y) = (PANEL_X, LOG_Y);
-        self.panel(x, y, PANEL_W, LOG_H, "Chronicle");
+        let title = if app.log_scroll > 0 {
+            format!("Chronicle · {} back", app.log_scroll)
+        } else {
+            "Chronicle".to_string()
+        };
+        self.panel(x, y, PANEL_W, LOG_H, &title);
+        if self.button("Share (E)", x + PANEL_W - 112.0, y + 9.0, 98.0, 26.0, false) {
+            press(app, Key::Char('e'), now);
+        }
+        // The mouse wheel scrolls back through the game.
+        if self.hovered(x, y, PANEL_W, LOG_H) {
+            let (_, wheel) = mouse_wheel();
+            if wheel != 0.0 {
+                app.scroll_log(if wheel > 0.0 { 1 } else { -1 });
+            }
+        }
         let size = 15.0;
         let line_h = 20.0;
         let max_lines = ((LOG_H - 44.0) / line_h) as usize;
-        let mut lines: Vec<String> = Vec::new();
-        for entry in app.log.iter().rev() {
-            let mut wrapped = self.wrap(&plain(entry), PANEL_W - 28.0, size);
+        let end = app.log.len() - app.log_scroll.min(app.log.len());
+        // (text, player the entry is about, first line of its entry)
+        let mut lines: Vec<(String, Option<Player>, bool)> = Vec::new();
+        for entry in app.log[..end].iter().rev() {
+            let who = entry_player(entry);
+            let mut wrapped: Vec<_> = self
+                .wrap(&plain(entry), PANEL_W - 40.0, size)
+                .into_iter()
+                .enumerate()
+                .map(|(j, line)| (line, who, j == 0))
+                .collect();
             wrapped.append(&mut lines);
             lines = wrapped;
             if lines.len() >= max_lines {
@@ -1098,27 +1129,114 @@ impl Ui<'_> {
             }
         }
         let skip = lines.len().saturating_sub(max_lines);
-        for (i, line) in lines.iter().skip(skip).enumerate() {
-            self.text(
-                line,
-                x + 14.0,
-                y + 50.0 + i as f32 * line_h,
-                size,
-                TEXT,
-                false,
-                Align::Left,
-            );
+        for (i, (line, who, first)) in lines.iter().skip(skip).enumerate() {
+            let ty = y + 50.0 + i as f32 * line_h;
+            if *first {
+                let dot = who.map_or(ACCENT, |p| piece_colors(p).0);
+                self.circle(vec2(x + 17.0, ty - 5.0), 3.5, dot);
+            }
+            self.text(line, x + 26.0, ty, size, TEXT, false, Align::Left);
+        }
+    }
+
+    fn leaderboard(&self, app: &mut App, now: Time) {
+        let (w, h) = (700.0, 560.0);
+        let (x, y) = ((CANVAS_W - w) / 2.0, 80.0);
+        self.panel(x, y, w, h, "");
+        self.text(
+            "Leaderboard",
+            CANVAS_W / 2.0,
+            y + 68.0,
+            40.0,
+            TEXT,
+            true,
+            Align::Center,
+        );
+        self.text(
+            "You against the computer",
+            CANVAS_W / 2.0,
+            y + 102.0,
+            18.0,
+            DIM,
+            false,
+            Align::Center,
+        );
+        // Column anchors: name on the left, numbers right-aligned.
+        let cols = [x + 290.0, x + 370.0, x + 450.0, x + 535.0];
+        let bar_x = x + 555.0;
+        let header_y = y + 160.0;
+        self.text(
+            "Opponent",
+            x + 60.0,
+            header_y,
+            17.0,
+            ACCENT,
+            true,
+            Align::Left,
+        );
+        for (label, cx) in ["Played", "Won", "Lost", "Win %"].iter().zip(cols) {
+            self.text(label, cx, header_y, 17.0, ACCENT, true, Align::Right);
+        }
+        let row = |name: &str, r: crate::stats::Record, ry: f32, bold: bool| {
+            self.text(name, x + 60.0, ry, 21.0, TEXT, bold, Align::Left);
+            let cells = match r.win_percent() {
+                Some(p) => [
+                    r.played.to_string(),
+                    r.won.to_string(),
+                    r.lost().to_string(),
+                    format!("{p}%"),
+                ],
+                None => ["0".into(), "–".into(), "–".into(), "–".into()],
+            };
+            for (cell, cx) in cells.iter().zip(cols) {
+                self.text(cell, cx, ry, 21.0, TEXT, bold, Align::Right);
+            }
+            self.rect(bar_x, ry - 13.0, 100.0, 12.0, rgb(24, 43, 63));
+            if let Some(p) = r.win_percent() {
+                self.rect(bar_x, ry - 13.0, p as f32, 12.0, ACCENT);
+            }
+        };
+        for (i, level) in ur_game::ai::Difficulty::ALL.into_iter().enumerate() {
+            let ry = header_y + 50.0 + i as f32 * 44.0;
+            row(&level.to_string(), app.leaderboard.record(level), ry, false);
+        }
+        let total_y = header_y + 50.0 + 4.0 * 44.0 + 14.0;
+        self.line(
+            vec2(x + 50.0, total_y - 32.0),
+            vec2(x + w - 50.0, total_y - 32.0),
+            1.0,
+            with_alpha(ACCENT, 0.4),
+        );
+        row("Total", app.leaderboard.total(), total_y, true);
+        self.text(
+            "Finished games against a computer player count.",
+            CANVAS_W / 2.0,
+            y + h - 82.0,
+            16.0,
+            DIM,
+            false,
+            Align::Center,
+        );
+        if self.button(
+            "Back",
+            CANVAS_W / 2.0 - 80.0,
+            y + h - 64.0,
+            160.0,
+            38.0,
+            false,
+        ) {
+            press(app, Key::Esc, now);
         }
     }
 
     fn footer(&self, app: &App) {
         let text = match &app.phase {
-            Phase::GameOver(_) => "Enter: rematch · Esc: menu",
+            Phase::GameOver(_) => "Enter: rematch · E: share the Chronicle · Esc: menu",
             Phase::Rolling { .. } | Phase::Moving { .. } => {
                 "Space: skip animation · Esc: menu · ?: rules"
             }
             _ if !app.current_is_human() => "Space: hurry the computer · Esc: menu · ?: rules",
-            Phase::AwaitRoll => "Space: throw · Esc: menu · ?: rules",
+            Phase::AwaitRoll => "Space: throw · E: share · Esc: menu · ?: rules",
             Phase::Choosing { .. } => {
                 "Click a piece to move it · Left/Right + Enter · 1-9 · H: hint · ?: rules · Esc: menu"
             }

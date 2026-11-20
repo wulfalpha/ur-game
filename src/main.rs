@@ -2,11 +2,13 @@
 //! `--tui`.
 
 mod app;
+mod chronicle;
 mod cli;
 mod gui;
 mod preferences;
 mod save;
 mod sound;
+mod stats;
 mod tui;
 mod ui;
 
@@ -29,6 +31,8 @@ fn main() -> io::Result<()> {
         start.elapsed(),
         save::default_path(),
         preferences::default_path(),
+        stats::default_path(),
+        chronicle::default_dir(),
     );
     if terminal {
         tui::run(app, start)

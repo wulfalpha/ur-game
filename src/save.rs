@@ -13,14 +13,18 @@
 //! light-pieces 0 0 0 3 6 15 15
 //! dark-pieces 0 0 0 0 0 1 9
 //! dice 5
+//! tally light 12 25 1 3 0
+//! tally dark 11 20 0 2 0
 //! log New game: Light (Human) vs Dark (Computer · Medium).
 //! log Light rolls 2: enters a piece on 2.
 //! ```
 //!
 //! `dice` is only present when the dice have been thrown but the throw not
-//! yet played; it holds the four tips as bits.
+//! yet played; it holds the four tips as bits. `tally` holds each player's
+//! throws, sum of throws, captures, rosettes and hints so far (missing in
+//! older saves, which then count from zero).
 
-use crate::app::Controller;
+use crate::app::{Controller, Tally};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -37,6 +41,8 @@ pub struct SavedGame {
     /// Tips of a throw not yet played, if any.
     pub pending_tips: Option<u8>,
     pub log: Vec<String>,
+    /// Each player's running totals, Light first.
+    pub tally: [Tally; 2],
 }
 
 /// Where the game is saved: the per-user data folder
@@ -90,6 +96,18 @@ impl SavedGame {
         if let Some(tips) = self.pending_tips {
             out += &format!("dice {tips}\n");
         }
+        for player in Player::ALL {
+            let t = self.tally[player.index()];
+            out += &format!(
+                "tally {} {} {} {} {} {}\n",
+                player_name(player),
+                t.throws,
+                t.pips,
+                t.captures,
+                t.rosettes,
+                t.hints
+            );
+        }
         for line in &self.log {
             // Log lines never contain newlines, but don't let one corrupt
             // the file if they ever do.
@@ -108,6 +126,7 @@ impl SavedGame {
         let mut pieces = [None; 2];
         let mut pending_tips = None;
         let mut log = Vec::new();
+        let mut tally = [Tally::default(); 2];
         for line in lines {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
@@ -120,6 +139,23 @@ impl SavedGame {
                     pieces[player.index()] = Some(parse_positions(value)?);
                 }
                 "dice" => pending_tips = Some(value.parse::<u8>().ok().filter(|&t| t < 16)?),
+                "tally" => {
+                    let (who, numbers) = value.split_once(' ')?;
+                    let n: Vec<u32> = numbers
+                        .split_whitespace()
+                        .map(|x| x.parse().ok())
+                        .collect::<Option<_>>()?;
+                    let [throws, pips, captures, rosettes, hints] = n[..] else {
+                        return None;
+                    };
+                    tally[parse_player(who)?.index()] = Tally {
+                        throws,
+                        pips,
+                        captures,
+                        rosettes,
+                        hints,
+                    };
+                }
                 "log" => log.push(value.to_string()),
                 _ => return None,
             }
@@ -133,6 +169,7 @@ impl SavedGame {
             game,
             pending_tips,
             log,
+            tally,
         })
     }
 }
@@ -195,7 +232,33 @@ mod tests {
             .unwrap(),
             pending_tips: Some(0b1011),
             log: vec!["New game.".into(), "Light rolls 2: moves 6 → 8.".into()],
+            tally: [
+                Tally {
+                    throws: 12,
+                    pips: 25,
+                    captures: 1,
+                    rosettes: 3,
+                    hints: 2,
+                },
+                Tally {
+                    throws: 11,
+                    pips: 20,
+                    ..Tally::default()
+                },
+            ],
         }
+    }
+
+    #[test]
+    fn older_saves_without_tally_still_load() {
+        let text: String = sample()
+            .to_text()
+            .lines()
+            .filter(|l| !l.starts_with("tally"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let loaded = SavedGame::from_text(&text).unwrap();
+        assert_eq!(loaded.tally, [Tally::default(); 2]);
     }
 
     #[test]
@@ -221,6 +284,8 @@ mod tests {
             good.replace("0 0 3 6 8 15 15", "0 0 3 6 8 15"), // six pieces
             good.replace("0 0 3 6 8 15 15", "0 0 3 6 9 15 15"), // collides on 9
             good.replace("dice 11", "dice 16"),
+            good.replace("tally light 12 25 1 3 2", "tally light 12 25 1 3"),
+            good.replace("tally light 12 25 1 3 2", "tally purple 12 25 1 3 2"),
             good.replace("turn dark\n", ""),
             good + "nonsense line\n",
         ] {

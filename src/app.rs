@@ -8,9 +8,11 @@
 //! presentational: the throw and the move are decided up front, and the
 //! game state only changes once the animation has finished.
 
+use crate::chronicle;
 use crate::preferences::{self, Preferences};
 use crate::save::{self, SavedGame};
 use crate::sound::Cue;
+use crate::stats::{self, Leaderboard};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -39,7 +41,10 @@ pub const STEP_TIME: Duration = Duration::from_millis(120);
 pub const LAND_TIME: Duration = Duration::from_millis(180);
 /// Extra pause on a capture so the hit registers.
 pub const IMPACT_TIME: Duration = Duration::from_millis(350);
-const LOG_CAPACITY: usize = 100;
+/// Enough for the longest games, so a shared Chronicle is complete.
+const LOG_CAPACITY: usize = 2000;
+/// Chronicle entries moved per scroll step.
+pub const LOG_SCROLL_STEP: usize = 3;
 /// The hint key asks this level for advice.
 pub const HINT_LEVEL: Difficulty = Difficulty::Hard;
 
@@ -76,6 +81,19 @@ impl Controller {
 pub enum Screen {
     Menu,
     Game,
+    Leaderboard,
+}
+
+/// Running totals for one player in the current game, for the summary at
+/// the end and the shared Chronicle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub throws: u32,
+    /// Sum of all throws.
+    pub pips: u32,
+    pub captures: u32,
+    pub rosettes: u32,
+    pub hints: u32,
 }
 
 /// Rows of the start menu.
@@ -87,16 +105,18 @@ pub enum MenuItem {
     Dark,
     Animation,
     Start,
+    Leaderboard,
     Quit,
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 6] = [
+    pub const ALL: [MenuItem; 7] = [
         MenuItem::Continue,
         MenuItem::Light,
         MenuItem::Dark,
         MenuItem::Animation,
         MenuItem::Start,
+        MenuItem::Leaderboard,
         MenuItem::Quit,
     ];
 }
@@ -191,6 +211,13 @@ pub struct App {
     pub dice: Option<Dice>,
     /// Newest entries last.
     pub log: Vec<String>,
+    /// How many entries back from the newest the Chronicle is scrolled.
+    pub log_scroll: usize,
+    /// This game's running totals, per player.
+    pub tally: [Tally; 2],
+    pub leaderboard: Leaderboard,
+    /// Text a front end should put on the clipboard (taken once).
+    pub clipboard: Option<String>,
     pub show_help: bool,
     /// Advice shown for the current move choice, if the player asked.
     pub hint: Option<Hint>,
@@ -212,6 +239,10 @@ pub struct App {
     preferences_failed: bool,
     save_path: Option<PathBuf>,
     save_failed: bool,
+    /// Where the leaderboard is kept; `None` keeps it in memory only.
+    stats_path: Option<PathBuf>,
+    /// Where shared chronicles are written; `None` only copies them.
+    chronicle_dir: Option<PathBuf>,
     deadline: Option<Time>,
     rng: StdRng,
 }
@@ -226,6 +257,12 @@ impl App {
             phase: Phase::AwaitRoll,
             dice: None,
             log: Vec::new(),
+            log_scroll: 0,
+            tally: [Tally::default(); 2],
+            leaderboard: Leaderboard::default(),
+            clipboard: None,
+            stats_path: None,
+            chronicle_dir: None,
             show_help: false,
             hint: None,
             should_quit: false,
@@ -269,6 +306,17 @@ impl App {
         } else {
             self.preferences_failed = false;
         }
+    }
+
+    /// Keep the leaderboard in `path`, starting from what's there.
+    pub fn use_stats_file(&mut self, path: PathBuf) {
+        self.leaderboard = stats::load(&path);
+        self.stats_path = Some(path);
+    }
+
+    /// Write shared chronicles into `dir`.
+    pub fn use_chronicle_dir(&mut self, dir: PathBuf) {
+        self.chronicle_dir = Some(dir);
     }
 
     /// Save games to `path`, and offer to continue the game saved there.
@@ -459,7 +507,61 @@ impl App {
         match self.screen {
             Screen::Menu => self.menu_key(key.code, now),
             Screen::Game => self.game_key(key.code, now),
+            Screen::Leaderboard => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
+                    self.screen = Screen::Menu;
+                    self.cue(Cue::Menu);
+                }
+            }
         }
+    }
+
+    /// Scroll the Chronicle: positive goes back in time.
+    pub fn scroll_log(&mut self, entries: isize) {
+        let max = self.log.len().saturating_sub(1);
+        self.log_scroll = self.log_scroll.saturating_add_signed(entries).min(max);
+    }
+
+    /// The game so far as plain text, for sharing.
+    pub fn chronicle_text(&self, secs: u64) -> String {
+        let throws = self.tally[0].throws + self.tally[1].throws;
+        let result = match self.phase {
+            Phase::GameOver(winner) => format!("{winner} won after {throws} throws."),
+            _ => format!("In progress after {throws} throws."),
+        };
+        let mut out = format!(
+            "The Royal Game of Ur: game record\n\
+             Light: {}\n\
+             Dark: {}\n\
+             Result: {result}\n\
+             Recorded: {}\n\n",
+            self.controllers[0].label(),
+            self.controllers[1].label(),
+            chronicle::timestamp(secs),
+        );
+        for line in &self.log {
+            out += line;
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Write the Chronicle to a file and hand it to the clipboard.
+    pub fn share_chronicle(&mut self) {
+        let secs = chronicle::now_secs();
+        let text = self.chronicle_text(secs);
+        let message = match &self.chronicle_dir {
+            Some(dir) => match chronicle::write(dir, secs, &text) {
+                Ok(path) => format!(
+                    "Chronicle saved to {} and copied to the clipboard.",
+                    path.display()
+                ),
+                Err(e) => format!("Couldn't save the Chronicle ({e}); copied to the clipboard."),
+            },
+            None => "Chronicle copied to the clipboard.".to_string(),
+        };
+        self.clipboard = Some(text);
+        self.push_log(message);
     }
 
     fn menu_key(&mut self, code: KeyCode, now: Time) {
@@ -494,6 +596,11 @@ impl App {
                     MenuItem::Continue if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) => {
                         self.resume(now);
                     }
+                    MenuItem::Leaderboard
+                        if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) =>
+                    {
+                        self.screen = Screen::Leaderboard;
+                    }
                     MenuItem::Start if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) => {
                         self.new_game(now)
                     }
@@ -525,6 +632,17 @@ impl App {
                 self.menu_selected = MenuItem::Continue;
             }
             return;
+        }
+        match code {
+            KeyCode::PageUp | KeyCode::Char('[') => {
+                return self.scroll_log(LOG_SCROLL_STEP as isize);
+            }
+            KeyCode::PageDown | KeyCode::Char(']') => {
+                return self.scroll_log(-(LOG_SCROLL_STEP as isize));
+            }
+            KeyCode::End => return self.log_scroll = 0,
+            KeyCode::Char('e') => return self.share_chronicle(),
+            _ => {}
         }
         let human = self.current_is_human();
         let confirm = matches!(code, KeyCode::Enter | KeyCode::Char(' '));
@@ -667,6 +785,8 @@ impl App {
         self.game = GameState::new();
         self.dice = None;
         self.log.clear();
+        self.log_scroll = 0;
+        self.tally = [Tally::default(); 2];
         self.hint = None;
         self.push_log(format!(
             "New game: Light ({}) vs Dark ({}).",
@@ -685,6 +805,8 @@ impl App {
         self.controllers = saved.controllers;
         self.game = saved.game;
         self.log = saved.log;
+        self.log_scroll = 0;
+        self.tally = saved.tally;
         self.dice = None;
         self.hint = None;
         match saved.pending_tips {
@@ -704,6 +826,9 @@ impl App {
     fn roll(&mut self, now: Time) {
         self.cue(Cue::Dice);
         let tips = (self.rng.next_u32() & 0b1111) as u8;
+        let tally = &mut self.tally[self.game.turn().index()];
+        tally.throws += 1;
+        tally.pips += u32::from(roll_from_tips(tips.into()));
         // Saved before anyone sees it, so quitting can't undo a bad throw.
         self.autosave(Some(tips));
         if self.animations {
@@ -732,7 +857,8 @@ impl App {
             } else {
                 "no legal move"
             };
-            self.push_log(format!("{player} rolls {roll}: {why}, turn passes."));
+            let n = self.throw_number();
+            self.push_log(format!("{n}. {player} rolls {roll}: {why}, turn passes."));
             self.phase = Phase::NoMoves { roll };
             self.deadline = Some(now + PASS_DELAY);
             return;
@@ -825,6 +951,9 @@ impl App {
                 describe_move(options[best].mv),
                 reasons[best]
             );
+            if self.hint.is_none() {
+                self.tally[self.game.turn().index()].hints += 1;
+            }
             self.hint = Some(Hint {
                 best,
                 loss,
@@ -857,23 +986,78 @@ impl App {
         } else {
             self.landing_sound(option);
         }
-        let mut text = format!("{player} rolls {roll}: {}", describe_move(mv));
+        let n = self.throw_number();
+        let mut text = format!("{n}. {player} rolls {roll}: {}", describe_move(mv));
+        let tally = &mut self.tally[player.index()];
         if outcome.captured {
             text.push_str(", captures");
+            tally.captures += 1;
         }
         if outcome.extra_turn {
             text.push_str(", rosette: rolls again");
+            tally.rosettes += 1;
         }
         text.push('.');
         self.push_log(text);
 
         if let Some(winner) = outcome.winner {
-            self.push_log(format!("{winner} wins the game!"));
+            self.finish_game(winner);
             self.phase = Phase::GameOver(winner);
             self.deadline = None;
             self.clear_save();
         } else {
             self.start_turn(now);
+        }
+    }
+
+    /// The number of the throw being played, counting both players.
+    fn throw_number(&self) -> u32 {
+        self.tally[0].throws + self.tally[1].throws
+    }
+
+    /// Sum up the game in the Chronicle and record it on the leaderboard.
+    fn finish_game(&mut self, winner: Player) {
+        let n = self.throw_number();
+        self.push_log(format!("{winner} wins the game after {n} throws!"));
+        for player in Player::ALL {
+            let t = self.tally[player.index()];
+            let average = if t.throws > 0 {
+                f64::from(t.pips) / f64::from(t.throws)
+            } else {
+                0.0
+            };
+            let plural =
+                |n: u32, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+            let mut line = format!(
+                "{player}: {}, average {average:.2}, {}, {}",
+                plural(t.throws, "throw"),
+                plural(t.captures, "capture"),
+                plural(t.rosettes, "rosette"),
+            );
+            if t.hints > 0 {
+                line += &format!(", {}", plural(t.hints, "hint"));
+            }
+            line.push('.');
+            self.push_log(line);
+        }
+        // Only human-vs-computer games count, by the computer's level.
+        let (human, level) = match self.controllers {
+            [Controller::Human, Controller::Computer(d)] => (Player::Light, d),
+            [Controller::Computer(d), Controller::Human] => (Player::Dark, d),
+            _ => return,
+        };
+        self.leaderboard.add(level, winner == human);
+        let r = self.leaderboard.record(level);
+        self.push_log(format!(
+            "Your record against {level}: {} of {} won ({}%).",
+            r.won,
+            r.played,
+            r.win_percent().unwrap_or(0)
+        ));
+        if let Some(path) = &self.stats_path
+            && let Err(e) = stats::store(path, &self.leaderboard)
+        {
+            self.push_log(format!("Couldn't save the leaderboard: {e}."));
         }
     }
 
@@ -892,6 +1076,7 @@ impl App {
             game: self.game,
             pending_tips,
             log: self.log.clone(),
+            tally: self.tally,
         };
         if let Some(path) = &self.save_path
             && let Err(e) = save::store(path, &saved)
@@ -914,9 +1099,14 @@ impl App {
 
     fn push_log(&mut self, line: String) {
         self.log.push(line);
+        // Keep a scrolled-back view where it is.
+        if self.log_scroll > 0 {
+            self.log_scroll += 1;
+        }
         if self.log.len() > LOG_CAPACITY {
             self.log.remove(0);
         }
+        self.log_scroll = self.log_scroll.min(self.log.len().saturating_sub(1));
     }
 }
 
@@ -1037,6 +1227,17 @@ impl Traits {
             "weaker a few turns on".into()
         }
     }
+}
+
+/// Which player a Chronicle entry is about, if it's one of their throws or
+/// hints: "12. Light rolls 3: …", "Hint for Dark: …".
+pub fn entry_player(entry: &str) -> Option<Player> {
+    let rest = entry.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.strip_prefix(". ").unwrap_or(rest);
+    let rest = rest.strip_prefix("Hint for ").unwrap_or(rest);
+    Player::ALL
+        .into_iter()
+        .find(|p| rest.starts_with(&format!("{p} ")) || rest.starts_with(&format!("{p}:")))
 }
 
 /// Human-readable move, using the mover's path square numbers.
@@ -1347,10 +1548,150 @@ mod tests {
             panic!("game never ended")
         };
         assert_eq!(app.game.winner(), Some(winner));
-        assert!(app.log.last().unwrap().contains("wins"));
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.starts_with(&format!("{winner} wins the game after")))
+        );
+        assert!(app.log.iter().any(|l| l.starts_with("Light: ")));
+        assert!(app.log.iter().any(|l| l.starts_with("Dark: ")));
+        // Computer-vs-computer games stay off the leaderboard.
+        assert_eq!(app.leaderboard.total().played, 0);
         assert_eq!(app.deadline(), None);
         app.handle_key(key(KeyCode::Char('n')), now);
         assert_eq!(app.game, GameState::new());
+    }
+
+    /// Play a whole game, the human always taking the first move offered.
+    fn play_out(app: &mut App, mut now: Time) -> Player {
+        for _ in 0..50_000 {
+            if let Phase::GameOver(winner) = app.phase {
+                return winner;
+            }
+            app.handle_key(key(KeyCode::Enter), now);
+            now += PASS_DELAY;
+            app.update(now);
+        }
+        panic!("game never ended");
+    }
+
+    #[test]
+    fn finished_games_are_numbered_summed_up_and_recorded() {
+        let (mut app, now) = game_app(Controller::Human, Controller::Computer(Difficulty::Easy));
+        let winner = play_out(&mut app, now);
+        let throws = app.tally[0].throws + app.tally[1].throws;
+        assert!(throws > 10);
+        // Throws are numbered from 1, both players together.
+        assert!(app.log.iter().any(|l| l.starts_with("1. Light rolls")));
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.starts_with(&format!("{throws}. ")))
+        );
+        let pips: u32 = app.tally.iter().map(|t| t.pips).sum();
+        assert!(pips > 0);
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l == &format!("{winner} wins the game after {throws} throws!"))
+        );
+        let record = app.leaderboard.record(Difficulty::Easy);
+        assert_eq!(record.played, 1);
+        assert_eq!(record.won, u32::from(winner == Player::Light));
+        let expected = format!(
+            "Your record against Easy: {} of 1 won ({}%).",
+            record.won,
+            record.won * 100
+        );
+        assert_eq!(app.log.last(), Some(&expected));
+        // A rematch counts again; human-vs-human doesn't count at all.
+        app.handle_key(key(KeyCode::Char('n')), now);
+        assert_eq!(app.tally, [Tally::default(); 2]);
+        play_out(&mut app, now);
+        assert_eq!(app.leaderboard.record(Difficulty::Easy).played, 2);
+        let (mut friends, now) = game_app(Controller::Human, Controller::Human);
+        play_out(&mut friends, now);
+        assert_eq!(friends.leaderboard.total().played, 0);
+    }
+
+    #[test]
+    fn leaderboard_is_saved_and_opened_from_the_menu() {
+        let dir = std::env::temp_dir().join(format!("ur-board-{}", std::process::id()));
+        let path = dir.join("stats.txt");
+        let (mut app, now) = game_app(Controller::Computer(Difficulty::Hard), Controller::Human);
+        app.use_stats_file(path.clone());
+        play_out(&mut app, now);
+        let mut again = App::new(0);
+        again.use_stats_file(path);
+        assert_eq!(again.leaderboard.record(Difficulty::Hard).played, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        again.menu_selected = MenuItem::Leaderboard;
+        again.handle_key(key(KeyCode::Enter), now);
+        assert_eq!(again.screen, Screen::Leaderboard);
+        again.handle_key(key(KeyCode::Esc), now);
+        assert_eq!(again.screen, Screen::Menu);
+    }
+
+    #[test]
+    fn chronicle_scrolls_and_stays_put_while_scrolled() {
+        let (mut app, now) = game_app(Controller::Human, Controller::Human);
+        for i in 0..10 {
+            app.push_log(format!("entry {i}"));
+        }
+        let len = app.log.len();
+        app.handle_key(key(KeyCode::PageUp), now);
+        assert_eq!(app.log_scroll, LOG_SCROLL_STEP);
+        app.push_log("newer".into());
+        assert_eq!(
+            app.log_scroll,
+            LOG_SCROLL_STEP + 1,
+            "view stays on the same entries"
+        );
+        app.scroll_log(1000);
+        assert_eq!(app.log_scroll, len, "clamped to the first entry");
+        app.handle_key(key(KeyCode::Char(']')), now);
+        assert_eq!(app.log_scroll, len - LOG_SCROLL_STEP);
+        app.handle_key(key(KeyCode::End), now);
+        assert_eq!(app.log_scroll, 0);
+    }
+
+    #[test]
+    fn sharing_writes_a_record_and_fills_the_clipboard() {
+        let dir = std::env::temp_dir().join(format!("ur-share-{}", std::process::id()));
+        let (mut app, now) = game_app(Controller::Human, Controller::Computer(Difficulty::Medium));
+        app.use_chronicle_dir(dir.clone());
+        let winner = play_out(&mut app, now);
+        app.handle_key(key(KeyCode::Char('e')), now);
+        let text = app.clipboard.take().expect("clipboard text");
+        assert!(text.starts_with("The Royal Game of Ur: game record\nLight: Human\n"));
+        assert!(text.contains("Dark: Computer · Medium\n"));
+        assert!(text.contains(&format!("Result: {winner} won after ")));
+        assert!(text.contains("\n1. Light rolls"));
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let path = files[0].as_ref().unwrap().path();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(app.log.last().unwrap().starts_with("Chronicle saved to "));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn entries_know_their_player() {
+        assert_eq!(
+            entry_player("12. Light rolls 3: moves 5 → 8."),
+            Some(Player::Light)
+        );
+        assert_eq!(
+            entry_player("Hint for Dark: enters a piece on 2."),
+            Some(Player::Dark)
+        );
+        assert_eq!(
+            entry_player("Dark: 30 throws, average 2.10."),
+            Some(Player::Dark)
+        );
+        assert_eq!(entry_player("New game: Light (Human) vs Dark."), None);
+        assert_eq!(entry_player("Lightning"), None);
     }
 
     fn human_app_with_position(light: [u8; 7], dark: [u8; 7]) -> (App, Time) {
