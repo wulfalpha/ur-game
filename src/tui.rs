@@ -20,7 +20,9 @@ pub fn run(mut app: App, start: Instant) -> io::Result<()> {
 }
 
 fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, start: Instant) -> io::Result<()> {
+    let mut audio = crate::sound::Audio::new();
     while !app.should_quit {
+        audio.update(app);
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         let now = start.elapsed();

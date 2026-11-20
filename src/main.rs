@@ -5,6 +5,7 @@ mod app;
 mod cli;
 mod gui;
 mod save;
+mod sound;
 mod tui;
 mod ui;
 

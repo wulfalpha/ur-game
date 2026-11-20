@@ -57,15 +57,18 @@ const PIECE: &str = "●";
 const GHOST: &str = "○";
 const ROSETTE: &str = "✦";
 
-const ACCENT: Color = Color::Yellow;
+const ACCENT: Color = Color::Rgb(231, 190, 105);
+const BACKGROUND: Color = Color::Rgb(9, 17, 30);
+const PANEL: Color = Color::Rgb(17, 31, 49);
+const TEXT: Color = Color::Rgb(242, 231, 207);
 const TARGET: Color = Color::Green;
-const DIM: Color = Color::DarkGray;
-const BOARD_EDGE: Color = Color::Rgb(150, 110, 60); // lapis-and-shell boards had wooden frames
-const ROSETTE_COLOR: Color = Color::Rgb(70, 110, 200); // lapis lazuli
+const DIM: Color = Color::Rgb(154, 163, 174);
+const BOARD_EDGE: Color = Color::Rgb(156, 126, 75); // lapis-and-shell boards had wooden frames
+const ROSETTE_COLOR: Color = Color::Rgb(132, 177, 235); // lapis lazuli
 
 // Tile backgrounds for the compact board.
-const TILE_A: Color = Color::Rgb(70, 50, 32);
-const TILE_B: Color = Color::Rgb(88, 64, 40);
+const TILE_A: Color = Color::Rgb(31, 49, 67);
+const TILE_B: Color = Color::Rgb(39, 60, 78);
 const TILE_ROSETTE: Color = Color::Rgb(28, 48, 115);
 const TILE_FROM: Color = Color::Rgb(125, 100, 15);
 const TILE_TO: Color = Color::Rgb(25, 100, 50);
@@ -77,12 +80,16 @@ fn player_color(p: Player) -> Color {
         // Shell-white and dark red, given as RGB so terminal themes can't
         // wash them out to similar pastels.
         Player::Light => Color::Rgb(245, 238, 220),
-        Player::Dark => Color::Rgb(141, 0, 23),
+        Player::Dark => Color::Rgb(237, 119, 100),
     }
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    frame.render_widget(
+        Block::new().style(Style::new().fg(TEXT).bg(BACKGROUND)),
+        area,
+    );
     let Some(mode) = mode_for(area) else {
         let msg = format!(
             "Terminal too small: {}×{}\n\nNeed {COMPACT_MIN_W}×{COMPACT_MIN_H} (landscape)\nor {MIN_W}×{MIN_H} (full).\n\nq to quit",
@@ -115,9 +122,15 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(21.min(area.height)),
     );
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Double)
         .border_style(Style::new().fg(BOARD_EDGE))
-        .title(Line::from(" 𒌷 The Royal Game of Ur ").bold().centered())
+        .style(Style::new().bg(PANEL).fg(TEXT))
+        .title(
+            Line::from(" ✦ The Royal Game of Ur ✦ ")
+                .fg(ACCENT)
+                .bold()
+                .centered(),
+        )
         .padding(Padding::uniform(1));
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
@@ -136,7 +149,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
     .areas(inner);
 
     frame.render_widget(
-        Paragraph::new("Played in Mesopotamia 4,500 years ago.\nRace all seven pieces home.")
+        Paragraph::new("M E S O P O T A M I A  ·  4,500 years ago\nRace all seven pieces home.")
             .alignment(Alignment::Center)
             .fg(DIM),
         intro,
@@ -162,7 +175,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
             let selected = *item == app.menu_selected;
             let cursor = if selected { "▶ " } else { "  " };
             let style = if selected {
-                Style::new().fg(ACCENT).bold()
+                Style::new().fg(ACCENT).bg(BACKGROUND).bold()
             } else {
                 Style::new()
             };
@@ -214,7 +227,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     frame.render_widget(
-        Paragraph::new("↑↓ select · ←→ change · Enter start · ? rules")
+        Paragraph::new("↑↓ select · ←→ change · Enter start · M sound · ? rules")
             .alignment(Alignment::Center)
             .fg(DIM),
         hint,
@@ -341,7 +354,7 @@ fn footer_hint(app: &App) -> &'static str {
         Phase::GameOver(_) => "Enter/n rematch · Esc menu · q quit",
         Phase::Rolling { .. } | Phase::Moving { .. } => "Space skip · Esc menu · ? rules · q quit",
         _ if !app.current_is_human() => "Space hurry · Esc menu · ? rules · q quit",
-        Phase::AwaitRoll => "Space roll · Esc menu · ? rules · q quit",
+        Phase::AwaitRoll => "Space roll · M sound · +/- volume · Esc menu · ? rules",
         Phase::Choosing { .. } => "←→ select · Enter play · 1-9 pick · h hint · ? rules · Esc menu",
         Phase::NoMoves { .. } => "Space continue · Esc menu · ? rules",
     }
@@ -542,10 +555,18 @@ impl Widget for BoardView<'_> {
                     Highlight::None if is_rosette_cell(row, col) => {
                         (Style::new().fg(ROSETTE_COLOR), BorderType::Double)
                     }
-                    Highlight::None => (Style::new().fg(BOARD_EDGE), BorderType::Rounded),
+                    Highlight::None => (Style::new().fg(BOARD_EDGE), BorderType::Plain),
                 };
                 let number = square_number(row, col).map_or(String::new(), |n| n.to_string());
+                let tile = if is_rosette_cell(row, col) {
+                    TILE_ROSETTE
+                } else if (row + col) % 2 == 0 {
+                    TILE_A
+                } else {
+                    TILE_B
+                };
                 let block = Block::bordered()
+                    .style(Style::new().bg(tile))
                     .border_type(border_type)
                     .border_style(border_style)
                     .title_bottom(Line::from(number).fg(DIM).right_aligned());
@@ -611,9 +632,10 @@ impl Widget for TileBoard<'_> {
 
 fn panel(title: &str) -> Block<'_> {
     Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(DIM))
-        .title(format!(" {title} "))
+        .border_type(BorderType::Double)
+        .style(Style::new().bg(PANEL).fg(TEXT))
+        .border_style(Style::new().fg(BOARD_EDGE))
+        .title(Line::from(format!(" {title} ")).fg(ACCENT))
         .padding(Padding::horizontal(1))
 }
 
@@ -823,7 +845,7 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
 }
 
 fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
-    let block = panel("Log");
+    let block = panel("Chronicle");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     // Word-wrap each entry, then keep as many of the newest lines as fit,
@@ -950,8 +972,9 @@ fn draw_help(frame: &mut Frame, area: Rect, mode: Mode) {
         Mode::Compact => short,
     };
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Double)
         .border_style(Style::new().fg(BOARD_EDGE))
+        .style(Style::new().bg(PANEL).fg(TEXT))
         .title(Line::from(" How to play ").bold().centered())
         .title_bottom(Line::from(" press any key to close ").fg(DIM).centered())
         .padding(Padding::horizontal(1));

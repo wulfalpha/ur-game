@@ -56,23 +56,23 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0)
 }
 
-const BACKGROUND: Color = rgb(24, 20, 17);
-const PANEL: Color = rgb(38, 31, 25);
-const PANEL_EDGE: Color = rgb(96, 72, 44);
-const TEXT: Color = rgb(232, 222, 200);
-const DIM: Color = rgb(150, 136, 112);
-const ACCENT: Color = rgb(240, 196, 64);
+const BACKGROUND: Color = rgb(9, 17, 30);
+const PANEL: Color = rgb(17, 31, 49);
+const PANEL_EDGE: Color = rgb(137, 108, 61);
+const TEXT: Color = rgb(242, 231, 207);
+const DIM: Color = rgb(167, 169, 167);
+const ACCENT: Color = rgb(231, 190, 105);
 const TARGET: Color = rgb(96, 204, 116);
 const DANGER: Color = rgb(226, 72, 60);
-const WOOD: Color = rgb(122, 84, 46);
-const WOOD_DARK: Color = rgb(78, 52, 28);
-const TILE_A: Color = rgb(112, 84, 56);
-const TILE_B: Color = rgb(128, 97, 64);
-const TILE_DOT: Color = rgb(150, 118, 82);
-const LAPIS: Color = rgb(36, 64, 146);
+const WOOD: Color = rgb(179, 139, 71);
+const WOOD_DARK: Color = rgb(61, 43, 31);
+const TILE_A: Color = rgb(210, 193, 158);
+const TILE_B: Color = rgb(231, 215, 183);
+const TILE_DOT: Color = rgb(37, 69, 103);
+const LAPIS: Color = rgb(27, 62, 117);
 const SHELL: Color = rgb(226, 208, 168);
 const CARNELIAN: Color = rgb(178, 52, 36);
-const NUMBER: Color = rgb(170, 146, 112);
+const NUMBER: Color = rgb(105, 85, 57);
 
 fn piece_colors(p: Player) -> (Color, Color, Color) {
     // (body, rim, dots)
@@ -118,6 +118,7 @@ async fn main_loop(mut app: App) {
         bold: load_ttf_font_from_bytes(include_bytes!("../assets/fonts/NotoSans-Bold.ttf"))
             .expect("bundled font"),
     };
+    let mut audio = crate::sound::Audio::new();
     while !app.should_quit {
         let now = Time::from_secs_f64(get_time());
         let mut ui = Ui::new(&fonts);
@@ -131,6 +132,7 @@ async fn main_loop(mut app: App) {
         ui.clicked = click && !help_open;
 
         clear_background(BACKGROUND);
+        ui.backdrop();
         match app.screen {
             Screen::Menu => ui.menu(&mut app, now),
             Screen::Game => ui.game(&mut app, now),
@@ -138,6 +140,8 @@ async fn main_loop(mut app: App) {
         if app.show_help {
             ui.help(&mut app, click && help_open);
         }
+        ui.sound_control(&mut app, now);
+        audio.update(&mut app);
         next_frame().await;
     }
 }
@@ -318,11 +322,33 @@ impl<'a> Ui<'a> {
         m.x >= x && m.x < x + w && m.y >= y && m.y < y + h
     }
 
+    /// Quiet geometric inlay around the edge of the virtual table.
+    fn backdrop(&self) {
+        self.rect_lines(12.0, 12.0, 1256.0, 696.0, 1.0, with_alpha(PANEL_EDGE, 0.45));
+        for x in (28..1260).step_by(24) {
+            for y in [20.0, 700.0] {
+                let c = vec2(x as f32, y);
+                self.line(c - vec2(3.0, 0.0), c - vec2(0.0, 3.0), 1.0, PANEL_EDGE);
+                self.line(c - vec2(0.0, 3.0), c + vec2(3.0, 0.0), 1.0, PANEL_EDGE);
+            }
+        }
+    }
+
     fn panel(&self, x: f32, y: f32, w: f32, h: f32, title: &str) {
+        self.rect(x + 4.0, y + 6.0, w, h, with_alpha(BLACK, 0.3));
         self.rect(x, y, w, h, PANEL);
         self.rect_lines(x, y, w, h, 2.0, PANEL_EDGE);
+        self.line(
+            vec2(x + 8.0, y + 5.0),
+            vec2(x + w - 8.0, y + 5.0),
+            1.0,
+            with_alpha(ACCENT, 0.3),
+        );
+        for (cx, cy) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
+            self.circle(vec2(cx, cy), 3.0, ACCENT);
+        }
         if !title.is_empty() {
-            self.text(title, x + 14.0, y + 26.0, 17.0, DIM, true, Align::Left);
+            self.text(title, x + 14.0, y + 26.0, 17.0, ACCENT, true, Align::Left);
         }
     }
 
@@ -332,9 +358,9 @@ impl<'a> Ui<'a> {
         let (bg, fg) = if selected {
             (ACCENT, BACKGROUND)
         } else if hover {
-            (rgb(70, 56, 40), TEXT)
+            (rgb(38, 61, 84), TEXT)
         } else {
-            (rgb(52, 42, 32), TEXT)
+            (rgb(24, 43, 63), TEXT)
         };
         self.rect(x, y, w, h, bg);
         self.rect_lines(x, y, w, h, 1.5, PANEL_EDGE);
@@ -359,6 +385,13 @@ impl<'a> Ui<'a> {
         self.circle(c + vec2(0.0, r * 0.12), r, with_alpha(BLACK, 0.35 * alpha));
         self.circle(c, r, with_alpha(rim, alpha));
         self.circle(c, r * 0.84, with_alpha(body, alpha));
+        self.circle_lines(c, r * 0.72, 1.0, with_alpha(rim, alpha * 0.6));
+        self.circle_lines(
+            c - vec2(0.0, r * 0.025),
+            r * 0.94,
+            1.0,
+            with_alpha(SHELL, alpha * 0.5),
+        );
         // Five inlaid dots, like the pieces found at Ur.
         let d = r * 0.4;
         for off in [
@@ -375,7 +408,10 @@ impl<'a> Ui<'a> {
     fn draw_rosette(&self, c: Vec2) {
         for k in 0..8 {
             let a = k as f32 * PI / 4.0;
-            self.circle(c + vec2(a.cos(), a.sin()) * 22.0, 11.0, SHELL);
+            let petal = c + vec2(a.cos(), a.sin()) * 22.0;
+            self.circle(petal, 12.0, ACCENT);
+            self.circle(petal, 9.0, SHELL);
+            self.circle(petal, 3.0, LAPIS);
         }
         self.circle(c, 14.0, SHELL);
         self.circle(c, 9.0, CARNELIAN);
@@ -478,6 +514,15 @@ impl Ui<'_> {
             Align::Center,
         );
         self.mini_board(vec2(CANVAS_W / 2.0, 222.0), 26.0);
+        self.text(
+            "L A P I S   ·   S H E L L   ·   C A R N E L I A N",
+            CANVAS_W / 2.0,
+            281.0,
+            13.0,
+            ACCENT,
+            false,
+            Align::Center,
+        );
 
         let items = app.menu_items();
         let row_h = 52.0;
@@ -497,9 +542,9 @@ impl Ui<'_> {
             match item {
                 MenuItem::Light | MenuItem::Dark | MenuItem::Animation => {
                     let bg = if selected {
-                        rgb(66, 52, 36)
+                        rgb(38, 61, 84)
                     } else {
-                        rgb(46, 38, 30)
+                        rgb(21, 37, 56)
                     };
                     self.rect(rx, ry, rw, row_h - 8.0, bg);
                     if selected {
@@ -676,6 +721,30 @@ impl Ui<'_> {
                     ] {
                         self.circle(c + off, 4.0, TILE_DOT);
                     }
+                }
+                self.rect_lines(
+                    x + 3.0,
+                    y + 3.0,
+                    CELL - 6.0,
+                    CELL - 6.0,
+                    1.0,
+                    if is_rosette_cell(row, col) {
+                        ACCENT
+                    } else {
+                        TILE_DOT
+                    },
+                );
+                if !is_rosette_cell(row, col) {
+                    self.rect_lines(
+                        x + 10.0,
+                        y + 10.0,
+                        CELL - 20.0,
+                        CELL - 20.0,
+                        1.0,
+                        with_alpha(TILE_DOT, 0.35),
+                    );
+                    self.circle_lines(c, 12.0, 1.5, TILE_DOT);
+                    self.circle(c, 4.0, CARNELIAN);
                 }
                 let number = path_position(Player::Light, row, col).or(path_position(
                     Player::Dark,
@@ -998,7 +1067,7 @@ impl Ui<'_> {
 
     fn log(&self, app: &App) {
         let (x, y) = (PANEL_X, LOG_Y);
-        self.panel(x, y, PANEL_W, LOG_H, "Log");
+        self.panel(x, y, PANEL_W, LOG_H, "Chronicle");
         let size = 15.0;
         let line_h = 20.0;
         let max_lines = ((LOG_H - 44.0) / line_h) as usize;
@@ -1039,6 +1108,33 @@ impl Ui<'_> {
             Phase::NoMoves { .. } => "Space: continue · Esc: menu · ?: rules",
         };
         self.text(text, 460.0, 706.0, 16.0, DIM, false, Align::Center);
+    }
+
+    fn sound_control(&self, app: &mut App, now: Time) {
+        let label = if app.sound_enabled {
+            format!("Sound {}%", (app.sound_volume * 100.0).round() as u8)
+        } else {
+            "Sound off".to_owned()
+        };
+        let (x, y) = if app.screen == Screen::Menu {
+            (24.0, 656.0)
+        } else {
+            (PANEL_X, 16.0)
+        };
+        if self.button(&label, x, y, 140.0, 34.0, false) {
+            press(app, Key::Char('m'), now);
+        }
+        if app.screen == Screen::Menu {
+            self.text(
+                "M: mute · +/-: volume",
+                24.0,
+                644.0,
+                14.0,
+                DIM,
+                false,
+                Align::Left,
+            );
+        }
     }
 
     fn top_buttons(&self, app: &mut App, now: Time) {

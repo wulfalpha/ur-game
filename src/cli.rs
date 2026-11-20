@@ -43,6 +43,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_animation: bool,
 
+    /// Start with sound muted. Press M to toggle sound during play.
+    #[arg(long)]
+    pub mute: bool,
+
     /// Seed for the dice (and the Random computer player), so a game can be
     /// replayed with the same throws.
     #[arg(long, value_name = "NUMBER")]
@@ -86,6 +90,7 @@ impl Cli {
         let mut app = App::new(self.seed.unwrap_or(default_seed));
         app.controllers = [self.light.into(), self.dark.into()];
         app.animations = !self.no_animation;
+        app.sound_enabled = !self.mute;
         if let Some(path) = save_path.filter(|_| !self.no_save) {
             app.use_save_file(path);
         }

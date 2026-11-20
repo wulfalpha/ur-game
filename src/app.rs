@@ -9,6 +9,7 @@
 //! game state only changes once the animation has finished.
 
 use crate::save::{self, SavedGame};
+use crate::sound::Cue;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -180,6 +181,9 @@ pub struct App {
     pub hint: Option<Hint>,
     pub should_quit: bool,
     pub animations: bool,
+    pub sound_enabled: bool,
+    pub sound_volume: f32,
+    pub sound_cues: Vec<Cue>,
     /// Time of the latest input or update; animations are drawn relative to it.
     pub now: Time,
     /// The game in progress (or saved from an earlier run) that "Continue"
@@ -206,6 +210,9 @@ impl App {
             hint: None,
             should_quit: false,
             animations: true,
+            sound_enabled: true,
+            sound_volume: 0.5,
+            sound_cues: Vec::new(),
             now: Time::ZERO,
             resumable: None,
             save_path: None,
@@ -355,6 +362,12 @@ impl App {
         }
     }
 
+    fn cue(&mut self, cue: Cue) {
+        if self.sound_enabled && self.sound_cues.len() < 16 {
+            self.sound_cues.push(cue);
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, now: Time) {
         self.now = now;
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -366,6 +379,20 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Char('m') => {
+                self.sound_enabled = !self.sound_enabled;
+                self.sound_cues.clear();
+                return;
+            }
+            KeyCode::Char('-' | '+') => {
+                let delta = if key.code == KeyCode::Char('-') {
+                    -0.1
+                } else {
+                    0.1
+                };
+                self.sound_volume = (self.sound_volume + delta).clamp(0.0, 1.0);
+                return;
+            }
             KeyCode::Char('?') | KeyCode::F(1) => {
                 self.show_help = true;
                 return;
@@ -560,6 +587,7 @@ impl App {
     }
 
     fn roll(&mut self, now: Time) {
+        self.cue(Cue::Dice);
         let tips = (self.rng.next_u32() & 0b1111) as u8;
         // Saved before anyone sees it, so quitting can't undo a bad throw.
         self.autosave(Some(tips));
@@ -679,6 +707,16 @@ impl App {
             .game
             .apply(roll, mv)
             .expect("move came from legal_moves");
+        self.cue(if outcome.captured {
+            Cue::Capture
+        } else {
+            Cue::Move
+        });
+        if outcome.winner.is_some() {
+            self.cue(Cue::Victory);
+        } else if outcome.extra_turn {
+            self.cue(Cue::Rosette);
+        }
         let mut text = format!("{player} rolls {roll}: {}", describe_move(mv));
         if outcome.captured {
             text.push_str(", captures");
@@ -786,6 +824,43 @@ mod tests {
         let now = Time::ZERO;
         app.new_game(now);
         (app, now)
+    }
+
+    #[test]
+    fn sound_events_follow_actions_and_muting_discards_pending_cues() {
+        let mut app = App::new(9);
+        app.controllers = [Controller::Human; 2];
+        app.animations = false;
+        app.new_game(Time::ZERO);
+        for _ in 0..32 {
+            app.roll(Time::ZERO);
+            assert_eq!(app.sound_cues.remove(0), Cue::Dice);
+            if app.options_len() > 0 {
+                let outcome = app.selected_move().unwrap().outcome;
+                app.play(0, Time::ZERO);
+                let expected = if outcome.captured {
+                    Cue::Capture
+                } else {
+                    Cue::Move
+                };
+                assert_eq!(app.sound_cues.remove(0), expected);
+                break;
+            }
+            app.pass(Time::ZERO);
+        }
+        app.handle_key(key(KeyCode::Char('m')), Time::ZERO);
+        assert!(!app.sound_enabled);
+        assert!(app.sound_cues.is_empty());
+        app.cue(Cue::Dice);
+        assert!(app.sound_cues.is_empty());
+        for _ in 0..20 {
+            app.handle_key(key(KeyCode::Char('-')), Time::ZERO);
+        }
+        assert_eq!(app.sound_volume, 0.0);
+        for _ in 0..20 {
+            app.handle_key(key(KeyCode::Char('+')), Time::ZERO);
+        }
+        assert_eq!(app.sound_volume, 1.0);
     }
 
     #[test]
