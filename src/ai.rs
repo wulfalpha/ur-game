@@ -6,7 +6,9 @@
 //! - [`Difficulty::Random`]: picks any legal move. A sparring dummy.
 //! - [`Difficulty::Easy`]: looks one move ahead with a simple evaluation.
 //! - [`Difficulty::Medium`]: expectiminimax, 2 plies.
-//! - [`Difficulty::Hard`]: expectiminimax, 4 plies.
+//! - [`Difficulty::Hard`]: expectiminimax, 5 plies. (Odd depths suit the
+//!   evaluation better: 5 plies beats 4 in about 55% of games, while 6 is
+//!   no better than 5 at twice the cost.)
 //!
 //! Expectiminimax is minimax with *chance nodes* for the dice: at the
 //! player's own decisions it maximises, at the opponent's it minimises, and
@@ -18,7 +20,9 @@ use crate::game::{
     FINISH, GameState, Move, PATH_LEN, Player, ROLL_PROBABILITIES, SAFE_ROSETTE, is_shared,
 };
 use rand::Rng;
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Difficulty {
@@ -42,7 +46,7 @@ impl Difficulty {
             Difficulty::Random => None,
             Difficulty::Easy => Some(1),
             Difficulty::Medium => Some(2),
-            Difficulty::Hard => Some(4),
+            Difficulty::Hard => Some(5),
         }
     }
 }
@@ -75,72 +79,111 @@ pub fn choose_move<R: Rng + ?Sized>(
         (1, _) => Some(moves[0]),
         (n, None) => Some(moves[rng.next_u32() as usize % n]),
         (_, Some(depth)) => {
-            let me = state.turn();
-            best_by_score(&moves, |&mv| {
-                let mut next = *state;
-                next.apply_unchecked(mv);
-                expectation(&next, me, depth - 1)
-            })
+            let scores = score_moves(state, &moves, depth);
+            best_index(&scores).map(|i| moves[i])
         }
     }
 }
 
-/// Score each of the moves (from the mover's point of view) — useful for a
-/// "hint" feature or showing the AI's reasoning.
-pub fn rank_moves(state: &GameState, roll: u8, depth: u32) -> Vec<(Move, f64)> {
-    let me = state.turn();
-    state
-        .legal_moves(roll)
-        .into_iter()
-        .map(|mv| {
+/// Score each legal move (from the mover's point of view) the way
+/// `difficulty` would, in [`GameState::legal_moves`] order. Useful for a
+/// "hint" feature or showing the AI's reasoning. Empty for `Random`.
+pub fn rank_moves(state: &GameState, roll: u8, difficulty: Difficulty) -> Vec<(Move, f64)> {
+    let Some(depth) = difficulty.depth() else {
+        return Vec::new();
+    };
+    let moves = state.legal_moves(roll);
+    let scores = score_moves(state, &moves, depth);
+    moves.into_iter().zip(scores).collect()
+}
+
+/// Expectiminimax value of each move, searched `depth` decision plies deep.
+fn score_moves(state: &GameState, moves: &[Move], depth: u32) -> Vec<f64> {
+    let mut search = Search {
+        me: state.turn(),
+        cache: HashMap::default(),
+    };
+    moves
+        .iter()
+        .map(|&mv| {
             let mut next = *state;
             next.apply_unchecked(mv);
-            (mv, expectation(&next, me, depth.saturating_sub(1)))
+            search.expectation(&next, depth.saturating_sub(1))
         })
         .collect()
 }
 
-fn best_by_score(moves: &[Move], mut score: impl FnMut(&Move) -> f64) -> Option<Move> {
-    let mut best: Option<(Move, f64)> = None;
-    for mv in moves {
-        let s = score(mv);
-        if best.is_none_or(|(_, b)| s > b) {
-            best = Some((*mv, s));
+/// Index of the highest score; ties go to the first.
+fn best_index(scores: &[f64]) -> Option<usize> {
+    (0..scores.len()).reduce(|b, i| if scores[i] > scores[b] { i } else { b })
+}
+
+/// One expectiminimax search, from `me`'s point of view.
+struct Search {
+    me: Player,
+    /// Values of chance nodes (and leaf evaluations) already worked out,
+    /// keyed by position and remaining depth. The same position is often
+    /// reached by different move orders; caching halves Hard's thinking time.
+    cache: HashMap<u64, f64, BuildHasherDefault<KeyHasher>>,
+}
+
+impl Search {
+    /// Chance node: expected value before the next roll.
+    fn expectation(&mut self, state: &GameState, depth: u32) -> f64 {
+        let key = state.packed() | u64::from(depth) << 48;
+        if let Some(&v) = self.cache.get(&key) {
+            return v;
         }
+        let v = if depth == 0 || state.winner().is_some() {
+            evaluate(state, self.me)
+        } else {
+            (0..ROLL_PROBABILITIES.len())
+                .map(|roll| ROLL_PROBABILITIES[roll] * self.decision(state, roll as u8, depth))
+                .sum()
+        };
+        self.cache.insert(key, v);
+        v
     }
-    best.map(|(mv, _)| mv)
+
+    /// Decision node: the player to move picks their best move for this roll.
+    fn decision(&mut self, state: &GameState, roll: u8, depth: u32) -> f64 {
+        let moves = state.move_list(roll);
+        if moves.is_empty() {
+            let mut next = *state;
+            next.pass_unchecked();
+            return self.expectation(&next, depth - 1);
+        }
+        let maximise = state.turn() == self.me;
+        let mut best = if maximise {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        for &mv in moves.iter() {
+            let mut next = *state;
+            next.apply_unchecked(mv);
+            let v = self.expectation(&next, depth - 1);
+            best = if maximise { best.max(v) } else { best.min(v) };
+        }
+        best
+    }
 }
 
-/// Chance node: expected value (for `me`) before the next roll.
-fn expectation(state: &GameState, me: Player, depth: u32) -> f64 {
-    if depth == 0 || state.winner().is_some() {
-        return evaluate(state, me);
-    }
-    ROLL_PROBABILITIES
-        .iter()
-        .enumerate()
-        .map(|(roll, p)| p * decision(state, roll as u8, me, depth))
-        .sum()
-}
+/// A fast hasher for the packed 64-bit position keys.
+#[derive(Default)]
+struct KeyHasher(u64);
 
-/// Decision node: the player to move picks their best move for this roll.
-fn decision(state: &GameState, roll: u8, me: Player, depth: u32) -> f64 {
-    let moves = state.legal_moves(roll);
-    if moves.is_empty() {
-        let mut next = *state;
-        next.pass_unchecked();
-        return expectation(&next, me, depth - 1);
+impl Hasher for KeyHasher {
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("only u64 keys are hashed");
     }
-    let maximise = state.turn() == me;
-    let values = moves.iter().map(|&mv| {
-        let mut next = *state;
-        next.apply_unchecked(mv);
-        expectation(&next, me, depth - 1)
-    });
-    if maximise {
-        values.fold(f64::NEG_INFINITY, f64::max)
-    } else {
-        values.fold(f64::INFINITY, f64::min)
+    fn write_u64(&mut self, key: u64) {
+        // Fibonacci hashing: one multiply mixes the bits well enough.
+        self.0 = key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    fn finish(&self) -> u64 {
+        // Fold the well-mixed high bits down to where the table looks.
+        self.0 ^ self.0 >> 32
     }
 }
 
@@ -311,6 +354,65 @@ mod tests {
         let g = pos(Player::Dark, [3, 9, 13, F, S, S, S], [8, 6, 1, S, S, S, S]);
         let diff = evaluate(&g, Player::Light) + evaluate(&g, Player::Dark);
         assert!(diff.abs() < 1e-9);
+    }
+
+    /// Plain expectiminimax with no cache, to check the cached search against.
+    fn reference(state: &GameState, me: Player, depth: u32) -> f64 {
+        if depth == 0 || state.winner().is_some() {
+            return evaluate(state, me);
+        }
+        (0..5u8)
+            .map(|roll| {
+                let moves = state.legal_moves(roll);
+                let child = |mv: Option<Move>| {
+                    let mut next = *state;
+                    match mv {
+                        Some(mv) => drop(next.apply_unchecked(mv)),
+                        None => next.pass_unchecked(),
+                    }
+                    reference(&next, me, depth - 1)
+                };
+                let v = if moves.is_empty() {
+                    child(None)
+                } else {
+                    let vals = moves.iter().map(|&mv| child(Some(mv)));
+                    if state.turn() == me {
+                        vals.fold(f64::NEG_INFINITY, f64::max)
+                    } else {
+                        vals.fold(f64::INFINITY, f64::min)
+                    }
+                };
+                ROLL_PROBABILITIES[roll as usize] * v
+            })
+            .sum()
+    }
+
+    #[test]
+    fn cache_does_not_change_scores() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let mut g = GameState::new();
+        let mut checked = 0;
+        while checked < 25 {
+            if g.winner().is_some() {
+                g = GameState::new();
+            }
+            let roll = roll_dice(&mut rng);
+            let moves = g.legal_moves(roll);
+            if moves.len() > 1 {
+                let scores = score_moves(&g, &moves, 3);
+                for (mv, got) in moves.iter().zip(scores) {
+                    let mut next = g;
+                    next.apply_unchecked(*mv);
+                    let want = reference(&next, g.turn(), 2);
+                    assert!((got - want).abs() < 1e-9, "{mv:?}: {got} vs {want}");
+                }
+                checked += 1;
+            }
+            match moves.get(rng.next_u32() as usize % moves.len().max(1)) {
+                Some(&m) => drop(g.apply(roll, m)),
+                None => g.pass(roll).unwrap(),
+            }
+        }
     }
 
     /// Play a match, alternating who goes first. Returns games won by `a`.

@@ -161,6 +161,38 @@ pub enum PositionError {
     Collision,
 }
 
+/// The legal moves in a position, held inline. There are at most seven:
+/// one entry (only while a piece waits, so at most six are on the board)
+/// plus one per piece on the board.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MoveList {
+    moves: [Move; PIECES_PER_PLAYER as usize],
+    len: usize,
+}
+
+impl Default for MoveList {
+    fn default() -> Self {
+        Self {
+            moves: [Move { from: 0, to: 0 }; PIECES_PER_PLAYER as usize],
+            len: 0,
+        }
+    }
+}
+
+impl MoveList {
+    fn push(&mut self, mv: Move) {
+        self.moves[self.len] = mv;
+        self.len += 1;
+    }
+}
+
+impl std::ops::Deref for MoveList {
+    type Target = [Move];
+    fn deref(&self) -> &[Move] {
+        &self.moves[..self.len]
+    }
+}
+
 /// Complete game state. Small and `Copy` so the AI can clone it freely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GameState {
@@ -257,6 +289,17 @@ impl GameState {
         })
     }
 
+    /// The whole state packed into 43 bits, for use as a hash key.
+    pub(crate) fn packed(&self) -> u64 {
+        u64::from(self.board[0])
+            | u64::from(self.board[1]) << 16
+            | u64::from(self.waiting[0]) << 32
+            | u64::from(self.waiting[1]) << 35
+            | u64::from(self.finished[0]) << 38
+            | u64::from(self.finished[1]) << 41
+            | (self.turn.index() as u64) << 44
+    }
+
     pub fn winner(&self) -> Option<Player> {
         Player::ALL
             .into_iter()
@@ -267,7 +310,12 @@ impl GameState {
     /// player must [`pass`](Self::pass) (always the case on a roll of 0).
     /// Entering pieces are deduplicated into a single move.
     pub fn legal_moves(&self, roll: u8) -> Vec<Move> {
-        let mut moves = Vec::new();
+        self.move_list(roll).to_vec()
+    }
+
+    /// [`legal_moves`](Self::legal_moves) without allocating, for the AI.
+    pub(crate) fn move_list(&self, roll: u8) -> MoveList {
+        let mut moves = MoveList::default();
         if roll == 0 || self.winner().is_some() {
             return moves;
         }

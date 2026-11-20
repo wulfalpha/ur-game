@@ -556,9 +556,8 @@ impl App {
         let Phase::Choosing { roll, .. } = self.phase else {
             return;
         };
-        let depth = HINT_LEVEL.depth().expect("hint level searches");
         // Same order as `options`: both come from `legal_moves`.
-        let scores: Vec<f64> = ai::rank_moves(&self.game, roll, depth)
+        let scores: Vec<f64> = ai::rank_moves(&self.game, roll, HINT_LEVEL)
             .into_iter()
             .map(|(_, score)| score)
             .collect();
