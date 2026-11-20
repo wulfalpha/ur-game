@@ -139,6 +139,12 @@ When you choose a move, the piece that will move is highlighted in gold
 and the square it lands on in green. In the move list, ⚔ marks a capture,
 ✦ a rosette and ♛ a winning move.
 
+A move that leaves its piece where the opponent could hit it shows the
+chance of that happening on their next throw, such as ⚠31% ("risk 31%" in
+the window). It counts every opponent piece within reach and the odds of
+each throw, so it's exact. The middle rosette and your own row are always
+safe.
+
 When you ask for a hint, the cursor jumps to the Hard AI's choice, marked
 ★. Every other move shows how much worse it is, such as −2.5. The scale is
 roughly one point per square of progress, so −2.5 is about two and a half
@@ -205,7 +211,7 @@ cargo run --release -- --light human --dark hard --start
 | `--no-save`          | Don't save, and ignore any saved game                |
 | `--no-animation`     | Turn off the dice and piece animations               |
 | `--mute`             | Start with sound muted; press M to enable it          |
-| `--seed NUMBER`      | Replay the same dice throws (and Random's moves)     |
+| `--seed NUMBER`      | Replay the same dice throws (and Random/Easy choices)|
 | `--tui`              | Play in the terminal instead of a window             |
 | `--gui`              | Open a window even over SSH                          |
 
@@ -216,7 +222,9 @@ keeps the players it was started with.
 ## The computer players
 
 - **Random** picks any legal move.
-- **Easy** looks one move ahead.
+- **Easy** looks one move ahead and usually, but not always, plays the
+  move it likes best. The worse a move looks, the less likely it is to
+  pick it, so it makes the occasional slip a beginner can punish.
 - **Medium** and **Hard** look two and five turns ahead, taking into account
   every possible throw of the dice and how likely each one is. Hard
   remembers positions it has already worked out (the same position often

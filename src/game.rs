@@ -48,6 +48,10 @@ pub const COLS: usize = 8;
 pub const ROLL_PROBABILITIES: [f64; 5] =
     [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
 
+/// The same odds as whole numbers: how many of the 16 equally likely ways
+/// the four dice can land give each roll.
+pub const ROLL_WAYS: [u8; 5] = [1, 4, 6, 4, 1];
+
 pub fn is_rosette(pos: u8) -> bool {
     ROSETTES.contains(&pos)
 }
@@ -276,6 +280,21 @@ impl GameState {
         (1..=PATH_LEN).contains(&pos) && self.board[player.index()] & bit(pos) != 0
     }
 
+    /// How many of the 16 equally likely throws would let `victim`'s
+    /// opponent capture the piece on `pos` with their next throw. Zero if
+    /// `victim` has no piece there, off the shared row, and on the safe
+    /// rosette.
+    pub fn capture_ways(&self, victim: Player, pos: u8) -> u8 {
+        if !is_shared(pos) || pos == SAFE_ROSETTE || !self.occupies(victim, pos) {
+            return 0;
+        }
+        let hunter = victim.opponent();
+        (1..=4u8)
+            .filter(|&d| pos > d && self.occupies(hunter, pos - d))
+            .map(|d| ROLL_WAYS[d as usize])
+            .sum()
+    }
+
     /// Path positions (`1..=14`) of `player`'s pieces on the board, ascending.
     pub fn pieces_on_board(&self, player: Player) -> impl Iterator<Item = u8> + '_ {
         let mask = self.board[player.index()];
@@ -489,6 +508,28 @@ mod tests {
     }
 
     #[test]
+    fn capture_ways_counts_hunters_behind() {
+        // Light on 9; Dark on 7 hits it with a 2 (6 ways), on 6 with a 3 (4).
+        let g =
+            GameState::from_positions(Player::Dark, [9, 0, 0, 0, 0, 0, 0], [7, 6, 0, 0, 0, 0, 0])
+                .unwrap();
+        assert_eq!(g.capture_ways(Player::Light, 9), 10);
+        assert_eq!(g.capture_ways(Player::Dark, 7), 0); // nothing behind it
+        assert_eq!(g.capture_ways(Player::Light, 10), 0); // no piece there
+        // A piece on its own row can hit the start of the shared row.
+        let g =
+            GameState::from_positions(Player::Dark, [5, 0, 0, 0, 0, 0, 0], [4, 0, 0, 0, 0, 0, 0])
+                .unwrap();
+        assert_eq!(g.capture_ways(Player::Light, 5), 4);
+        // Safe on the middle rosette and on your own row.
+        let g =
+            GameState::from_positions(Player::Dark, [8, 3, 0, 0, 0, 0, 0], [7, 6, 2, 0, 0, 0, 0])
+                .unwrap();
+        assert_eq!(g.capture_ways(Player::Light, 8), 0);
+        assert_eq!(g.capture_ways(Player::Light, 3), 0);
+    }
+
+    #[test]
     fn roll_distribution() {
         let total: f64 = ROLL_PROBABILITIES.iter().sum();
         assert!((total - 1.0).abs() < 1e-12);
@@ -498,6 +539,7 @@ mod tests {
             counts[roll_from_tips(bits) as usize] += 1;
         }
         assert_eq!(counts, [1, 4, 6, 4, 1]);
+        assert_eq!(counts.map(|c| c as u8), ROLL_WAYS);
         let mut rng = StdRng::seed_from_u64(7);
         assert!((0..1000).all(|_| roll_dice(&mut rng) <= 4));
     }

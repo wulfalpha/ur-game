@@ -7,7 +7,7 @@
 //! Everything is laid out on a virtual 1280×720 landscape canvas and scaled
 //! to fit the window, so the game looks the same at any size.
 
-use crate::app::{App, MenuItem, MoveOption, Phase, Screen, Time};
+use crate::app::{App, MenuItem, MoveOption, Phase, Screen, Time, risk_percent};
 use macroquad::prelude::*;
 
 use ratatui::crossterm::event::{KeyCode as Key, KeyEvent, KeyModifiers};
@@ -64,6 +64,7 @@ const DIM: Color = rgb(167, 169, 167);
 const ACCENT: Color = rgb(231, 190, 105);
 const TARGET: Color = rgb(96, 204, 116);
 const DANGER: Color = rgb(226, 72, 60);
+const RISK: Color = rgb(240, 150, 70);
 const WOOD: Color = rgb(179, 139, 71);
 const WOOD_DARK: Color = rgb(61, 43, 31);
 const TILE_A: Color = rgb(210, 193, 158);
@@ -1050,6 +1051,9 @@ impl Ui<'_> {
             if opt.outcome.extra_turn {
                 tag("rosette", rgb(110, 150, 240));
             }
+            if opt.risk > 0 {
+                tag(&format!("risk {}%", risk_percent(opt.risk)), RISK);
+            }
             if human && self.clicked && self.hovered(rx, ry, rw, MOVE_ROW_H - 2.0) {
                 clicked = Some(i);
             }
@@ -1214,6 +1218,10 @@ impl Ui<'_> {
             (
                 "Rosettes",
                 "Landing on a rosette gives you another throw. The middle rosette is also safe from capture.",
+            ),
+            (
+                "Risk",
+                "In the move list, \"risk 31%\" is the chance the moved piece can be captured on the opponent's next throw.",
             ),
         ];
         let mut ty = y + 92.0;

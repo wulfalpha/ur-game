@@ -1,6 +1,6 @@
 //! Rendering. Reads `App`, never mutates it.
 
-use crate::app::{App, Controller, Dice, MenuItem, Phase, Screen, describe_move};
+use crate::app::{App, Controller, Dice, MenuItem, Phase, Screen, describe_move, risk_percent};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -65,6 +65,7 @@ const TARGET: Color = Color::Green;
 const DIM: Color = Color::Rgb(154, 163, 174);
 const BOARD_EDGE: Color = Color::Rgb(156, 126, 75); // lapis-and-shell boards had wooden frames
 const ROSETTE_COLOR: Color = Color::Rgb(132, 177, 235); // lapis lazuli
+const RISK_COLOR: Color = Color::Rgb(240, 150, 70); // amber
 
 // Tile backgrounds for the compact board.
 const TILE_A: Color = Color::Rgb(31, 49, 67);
@@ -819,6 +820,12 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
                 if o.outcome.winner.is_some() {
                     spans.push(Span::styled(" ♛", Style::new().fg(ACCENT).bold()));
                 }
+                if o.risk > 0 {
+                    spans.push(Span::styled(
+                        format!(" ⚠{}%", risk_percent(o.risk)),
+                        Style::new().fg(RISK_COLOR).bold(),
+                    ));
+                }
                 if let Some(hint) = &app.hint {
                     spans.push(if i == hint.best {
                         Span::styled(" ★", Style::new().fg(ACCENT).bold())
@@ -951,7 +958,7 @@ fn draw_help(frame: &mut Frame, area: Rect, mode: Mode) {
         Line::from(""),
         h("Dice"),
         Line::from(
-            "Four 4-sided dice, each with two marked tips. Your throw is the number of marks showing (0–4). 2 is most common; 0 and 4 come up only 1 time in 16.",
+            "Four 4-sided dice with two marked tips each. Your throw is the marks showing (0–4); 2 is most common, 0 and 4 just 1 time in 16.",
         ),
         Line::from(""),
         h("Moving"),
@@ -965,6 +972,10 @@ fn draw_help(frame: &mut Frame, area: Rect, mode: Mode) {
         Line::from(vec![
             Span::styled("✦ Rosette  ", Style::new().fg(ROSETTE_COLOR).bold()),
             Span::raw("Throw again. The middle rosette is also safe from capture."),
+        ]),
+        Line::from(vec![
+            Span::styled("⚠ Risk  ", Style::new().fg(RISK_COLOR).bold()),
+            Span::raw("Chance the moved piece can be captured on the next throw."),
         ]),
     ];
     let text = match mode {
@@ -1059,6 +1070,31 @@ mod tests {
             word_wrap("Light rolls 2 → 3", 40),
             vec!["Light rolls 2 → 3"]
         );
+    }
+
+    #[test]
+    fn move_list_and_help_show_capture_risk() {
+        use crate::app::MoveOption;
+        use ur_game::game::Outcome;
+        let mut app = App::new(0);
+        app.controllers = [Controller::Human, Controller::Human];
+        app.new_game(Time::ZERO);
+        app.phase = Phase::Choosing {
+            roll: 2,
+            options: vec![MoveOption {
+                mv: Move { from: 7, to: 9 },
+                outcome: Outcome::default(),
+                risk: 5,
+            }],
+            selected: 0,
+        };
+        for (w, h) in [(MIN_W, MIN_H), (COMPACT_MIN_W, COMPACT_MIN_H)] {
+            let out = render(&app, w, h);
+            assert!(out.contains("⚠31%"), "{w}×{h}:\n{out}");
+        }
+        app.show_help = true;
+        let out = render(&app, MIN_W, MIN_H);
+        assert!(out.contains("⚠ Risk"), "{out}");
     }
 
     #[test]

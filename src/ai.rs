@@ -4,7 +4,9 @@
 //! which legal move should the current player make?
 //!
 //! - [`Difficulty::Random`]: picks any legal move. A sparring dummy.
-//! - [`Difficulty::Easy`]: looks one move ahead with a simple evaluation.
+//! - [`Difficulty::Easy`]: looks one move ahead with a simple evaluation,
+//!   and usually, but not always, plays the move it rates best: the worse a
+//!   move looks, the less likely it is to be picked.
 //! - [`Difficulty::Medium`]: expectiminimax, 2 plies.
 //! - [`Difficulty::Hard`]: expectiminimax, 5 plies. (Odd depths suit the
 //!   evaluation better: 5 plies beats 4 in about 55% of games, while 6 is
@@ -16,9 +18,7 @@
 //! [`ROLL_PROBABILITIES`]. Rosette extra turns need no special handling:
 //! a decision node simply checks whose turn it is.
 
-use crate::game::{
-    FINISH, GameState, Move, PATH_LEN, Player, ROLL_PROBABILITIES, SAFE_ROSETTE, is_shared,
-};
+use crate::game::{FINISH, GameState, Move, PATH_LEN, Player, ROLL_PROBABILITIES, SAFE_ROSETTE};
 use rand::Rng;
 use std::collections::HashMap;
 use std::fmt;
@@ -49,7 +49,25 @@ impl Difficulty {
             Difficulty::Hard => Some(5),
         }
     }
+
+    /// How loosely this level picks among its moves: each move is chosen
+    /// with weight `exp(-loss / temperature)`, where `loss` is how far it
+    /// scores below the best move (about one point per square). `None`
+    /// always plays the best move.
+    pub fn temperature(self) -> Option<f64> {
+        match self {
+            Difficulty::Easy => Some(EASY_TEMPERATURE),
+            _ => None,
+        }
+    }
 }
+
+/// Easy's [`Difficulty::temperature`]. A move one square worse than the best
+/// is picked about a third as often as the best; one four squares worse,
+/// about a fiftieth as often. Easy still plays its top move in about 87% of
+/// real choices, and Medium beats it about 62% of the time (54% when Easy
+/// always played its top move).
+const EASY_TEMPERATURE: f64 = 1.0;
 
 impl fmt::Display for Difficulty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -65,8 +83,8 @@ impl fmt::Display for Difficulty {
 /// Choose a move for the player to move in `state` with this `roll`.
 /// Returns `None` when there is no legal move (the player must pass).
 ///
-/// Non-random difficulties are deterministic: ties go to the first move in
-/// [`GameState::legal_moves`] order. `rng` is only used by `Random`.
+/// Medium and Hard are deterministic: ties go to the first move in
+/// [`GameState::legal_moves`] order. `rng` is used by `Random` and `Easy`.
 pub fn choose_move<R: Rng + ?Sized>(
     state: &GameState,
     roll: u8,
@@ -80,9 +98,33 @@ pub fn choose_move<R: Rng + ?Sized>(
         (n, None) => Some(moves[rng.next_u32() as usize % n]),
         (_, Some(depth)) => {
             let scores = score_moves(state, &moves, depth);
-            best_index(&scores).map(|i| moves[i])
+            let index = match difficulty.temperature() {
+                Some(t) => sample_index(&scores, t, rng),
+                None => best_index(&scores),
+            };
+            index.map(|i| moves[i])
         }
     }
+}
+
+/// Pick an index at random, favouring higher scores: weight
+/// `exp((score - best) / temperature)`.
+fn sample_index<R: Rng + ?Sized>(scores: &[f64], temperature: f64, rng: &mut R) -> Option<usize> {
+    let best = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let weights: Vec<f64> = scores
+        .iter()
+        .map(|s| ((s - best) / temperature).exp())
+        .collect();
+    // Uniform in [0, 1) from the top 53 bits.
+    let unit = (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+    let mut r = unit * weights.iter().sum::<f64>();
+    for (i, &w) in weights.iter().enumerate() {
+        if r < w {
+            return Some(i);
+        }
+        r -= w;
+    }
+    best_index(scores)
 }
 
 /// Score each legal move (from the mover's point of view) the way
@@ -240,17 +282,9 @@ fn material(state: &GameState, player: Player) -> f64 {
 /// exposed piece, the chance the opponent rolls a distance that hits it,
 /// times the progress that piece has made.
 fn exposure(state: &GameState, victim: Player) -> f64 {
-    let hunter = victim.opponent();
     state
         .pieces_on_board(victim)
-        .filter(|&pos| is_shared(pos) && pos != SAFE_ROSETTE)
-        .map(|pos| {
-            let hit_chance: f64 = (1..=4u8)
-                .filter(|&d| pos > d && state.occupies(hunter, pos - d))
-                .map(|d| ROLL_PROBABILITIES[d as usize])
-                .sum();
-            hit_chance * pos as f64
-        })
+        .map(|pos| f64::from(state.capture_ways(victim, pos)) / 16.0 * pos as f64)
         .sum()
 }
 
@@ -275,6 +309,14 @@ mod tests {
     }
 
     const SMART: [Difficulty; 3] = [Difficulty::Easy, Difficulty::Medium, Difficulty::Hard];
+
+    /// The move `d` rates best (what Medium and Hard always play, and what
+    /// Easy plays most of the time).
+    fn top(state: &GameState, roll: u8, d: Difficulty) -> Option<Move> {
+        let ranked = rank_moves(state, roll, d);
+        let scores: Vec<f64> = ranked.iter().map(|&(_, s)| s).collect();
+        best_index(&scores).map(|i| ranked[i].0)
+    }
 
     #[test]
     fn no_moves_means_none() {
@@ -324,7 +366,7 @@ mod tests {
         // Light can capture Dark's advanced piece on 10, or enter a piece.
         let g = pos(Player::Light, [7, S, S, S, S, S, S], [10, S, S, S, S, S, S]);
         for d in SMART {
-            assert_eq!(pick(&g, 3, d), Some(Move { from: 7, to: 10 }), "{d}");
+            assert_eq!(top(&g, 3, d), Some(Move { from: 7, to: 10 }), "{d}");
         }
     }
 
@@ -334,7 +376,7 @@ mod tests {
         // entering on 2 or a pointless private-lane shuffle.
         let g = pos(Player::Light, [6, S, S, S, S, S, S], [S; 7]);
         for d in SMART {
-            assert_eq!(pick(&g, 2, d), Some(Move { from: 6, to: 8 }), "{d}");
+            assert_eq!(top(&g, 2, d), Some(Move { from: 6, to: 8 }), "{d}");
         }
     }
 
@@ -345,8 +387,33 @@ mod tests {
         // instead of entering a new piece.
         let g = pos(Player::Light, [9, S, S, S, S, S, S], [7, 6, S, S, S, S, S]);
         for d in SMART {
-            assert_eq!(pick(&g, 3, d), Some(Move { from: 9, to: 12 }), "{d}");
+            assert_eq!(top(&g, 3, d), Some(Move { from: 9, to: 12 }), "{d}");
         }
+    }
+
+    #[test]
+    fn medium_and_hard_play_their_top_move() {
+        let g = pos(Player::Light, [9, S, S, S, S, S, S], [7, 6, S, S, S, S, S]);
+        for d in [Difficulty::Medium, Difficulty::Hard] {
+            assert_eq!(pick(&g, 3, d), top(&g, 3, d), "{d}");
+        }
+    }
+
+    #[test]
+    fn easy_usually_but_not_always_plays_its_top_move() {
+        // Running from danger (9→12) is clearly best, entering a piece is a
+        // reasonable alternative.
+        let g = pos(Player::Light, [9, S, S, S, S, S, S], [7, 6, S, S, S, S, S]);
+        let best = top(&g, 3, Difficulty::Easy);
+        let mut rng = StdRng::seed_from_u64(8);
+        let n = 2000;
+        let hits = (0..n)
+            .filter(|_| choose_move(&g, 3, Difficulty::Easy, &mut rng) == best)
+            .count();
+        assert!(
+            hits > n / 2 && hits < n,
+            "Easy chose the top move {hits}/{n} times"
+        );
     }
 
     #[test]

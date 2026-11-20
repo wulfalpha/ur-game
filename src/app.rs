@@ -138,6 +138,14 @@ pub struct Hint {
 pub struct MoveOption {
     pub mv: Move,
     pub outcome: Outcome,
+    /// How many of the opponent's 16 equally likely throws could capture
+    /// the moved piece on their next turn. See [`risk_percent`].
+    pub risk: u8,
+}
+
+/// A risk in sixteenths as a whole percentage: 5 → 31.
+pub fn risk_percent(sixteenths: u8) -> u32 {
+    (u32::from(sixteenths) * 100 + 8) / 16
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -729,7 +737,8 @@ impl App {
             .map(|&mv| {
                 let mut preview = self.game;
                 let outcome = preview.apply(roll, mv).expect("legal move");
-                MoveOption { mv, outcome }
+                let risk = preview.capture_ways(player, mv.to);
+                MoveOption { mv, outcome, risk }
             })
             .collect();
         let selected = match self.controller(player) {
@@ -1075,6 +1084,25 @@ mod tests {
     }
 
     #[test]
+    fn move_options_carry_capture_risk() {
+        let mut app = App::new(1);
+        app.animations = false;
+        app.controllers = [Controller::Human, Controller::Human];
+        app.screen = Screen::Game;
+        app.game =
+            GameState::from_positions(Player::Light, [7, 0, 0, 0, 0, 0, 0], [6, 5, 0, 0, 0, 0, 0])
+                .unwrap();
+        app.resolve_roll(0b0011, Time::ZERO); // a 2
+        let risk = |to| app.options().iter().find(|o| o.mv.to == to).unwrap().risk;
+        // Dark reaches 9 with a 3 (from 6, 4 ways) or a 4 (from 5, 1 way).
+        assert_eq!(risk(9), 5);
+        assert_eq!(risk(2), 0); // entering: Light's own row
+        assert_eq!(risk_percent(5), 31);
+        assert_eq!(risk_percent(1), 6);
+        assert_eq!(risk_percent(16), 100);
+    }
+
+    #[test]
     fn number_keys_pick_moves_and_selection_wraps() {
         let mut app = App::new(5);
         app.animations = false;
@@ -1090,6 +1118,7 @@ mod tests {
             .map(|mv| MoveOption {
                 mv,
                 outcome: Outcome::default(),
+                risk: 0,
             })
             .collect();
         assert_eq!(options.len(), 3);
