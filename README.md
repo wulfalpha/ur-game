@@ -1,6 +1,7 @@
 # The ancient Royal Game of Ur
 
-One of the oldest board games known, playable in your terminal.
+One of the oldest board games known, playable in a window or in your
+terminal.
 
 The game was played in Mesopotamia about 4,500 years ago. The best-known
 boards were dug up by Sir Leonard Woolley in the Royal Cemetery at Ur (in
@@ -82,15 +83,29 @@ throws. The game shows all four dice, with the marked tips filled in.
 
 ## Playing
 
-You need [Rust](https://www.rust-lang.org/tools/install) and a terminal at
-least 66 columns wide and 12 rows tall. Below 82×22 the game switches to a
-compact landscape layout, which fits a phone turned on its side.
+You need [Rust](https://www.rust-lang.org/tools/install).
 
 ```
 git clone https://github.com/wulfalpha/ur-game
 cd ur-game
 cargo run --release
 ```
+
+This opens the game in a window. To play in the terminal instead, add
+`--tui`:
+
+```
+cargo run --release -- --tui
+```
+
+The terminal version is chosen automatically when there's no display to
+open a window on, for example over SSH. It needs a terminal at least 66
+columns wide and 12 rows tall. Below 82×22 it switches to a compact
+landscape layout, which fits a phone turned on its side.
+
+In the window, click the dice to throw, then click a piece (or the square
+it would land on) to move it. Hovering shows where it would go. All the
+keys below work in the window too.
 
 In the menu, choose Human or Computer for each side. The computer has four
 levels: Random, Easy, Medium and Hard. You can also turn the dice and piece
@@ -144,7 +159,8 @@ cargo run --release -- --light human --dark hard --start
 | `--no-save`          | Don't save, and ignore any saved game                |
 | `--no-animation`     | Turn off the dice and piece animations               |
 | `--seed NUMBER`      | Replay the same dice throws                          |
-| `--tui`              | Use the terminal interface (currently the only one)  |
+| `--tui`              | Play in the terminal instead of a window             |
+| `--gui`              | Open a window even over SSH                          |
 
 `PLAYER` is one of `human`, `random`, `easy`, `medium` or `hard`. Set both
 sides to computer players to watch them play each other. A continued game
@@ -180,15 +196,19 @@ cargo run --release --example arena 400
 |--------------------|-----------------------------------------------------------|
 | `src/game.rs`      | The rules: board, dice, legal moves, captures, rosettes   |
 | `src/ai.rs`        | The computer players                                      |
-| `src/app.rs`       | Game flow for the terminal version: menu, turns, input    |
+| `src/app.rs`       | Game flow shared by both versions: menu, turns, input     |
 | `src/cli.rs`       | Command-line options                                      |
 | `src/save.rs`      | Saving and resuming a game                                |
+| `src/gui.rs`       | The window version, drawn with macroquad                  |
+| `src/tui.rs`       | The terminal version's main loop                          |
 | `src/ui.rs`        | Drawing the terminal screens                              |
-| `src/main.rs`      | Starts the terminal app                                   |
+| `src/main.rs`      | Picks the window or the terminal and starts the game      |
 | `examples/arena.rs`| Computer-vs-computer matches                              |
+| `assets/fonts/`    | Noto Sans, the font used in the window                    |
 
-The rules and computer players are a library with no terminal code in them,
-so a graphical version can be added later on top of the same code.
+The rules and computer players are a library with no screen code in them.
+The window and terminal versions share the same game flow, so they play
+exactly alike.
 
 Run the tests with `cargo test`.
 

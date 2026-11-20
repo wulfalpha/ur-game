@@ -964,11 +964,11 @@ fn draw_help(frame: &mut Frame, area: Rect, mode: Mode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Time;
     use crate::app::{AI_DELAY, App};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
-    use std::time::Instant;
     use ur_game::ai::Difficulty;
 
     fn render(app: &App, w: u16, h: u16) -> String {
@@ -1003,7 +1003,7 @@ mod tests {
         let ai = Controller::Computer(Difficulty::Easy);
         let mut app = App::new(9);
         app.controllers = [ai, ai];
-        let mut now = Instant::now();
+        let mut now = Time::ZERO;
         app.new_game(now);
         app.show_help = false;
         // Render a full AI game, animations included, at two sizes: must
@@ -1060,7 +1060,7 @@ mod tests {
         let ai = Controller::Computer(Difficulty::Easy);
         let mut app = App::new(4);
         app.controllers = [ai, ai];
-        let mut now = Instant::now();
+        let mut now = Time::ZERO;
         app.new_game(now);
         for _ in 0..20_000 {
             for (w, h) in [(COMPACT_MIN_W, COMPACT_MIN_H), (100, 16), (70, 40)] {
@@ -1087,14 +1087,14 @@ mod tests {
         assert!(out.contains("Royal Game of Ur"));
         // With a game to continue, all six rows still fit.
         app.controllers[1] = Controller::Computer(Difficulty::Hard);
-        app.new_game(Instant::now());
-        app.handle_key(KeyEvent::from(KeyCode::Esc), Instant::now());
+        app.new_game(Time::ZERO);
+        app.handle_key(KeyEvent::from(KeyCode::Esc), Time::ZERO);
         for size in [(COMPACT_MIN_W, COMPACT_MIN_H), (MIN_W, MIN_H)] {
             let out = render(&app, size.0, size.1);
             assert!(out.contains("▶ Continue (Human vs Hard)"), "{out}");
             assert!(out.contains("Quit"), "{out}");
         }
-        app.handle_key(KeyEvent::from(KeyCode::Char('?')), Instant::now());
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')), Time::ZERO);
         let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
         assert!(out.contains("Rosettes give another throw"), "{out}");
     }
@@ -1115,7 +1115,7 @@ mod tests {
     #[test]
     fn renders_help_overlay() {
         let mut app = App::new(0);
-        app.handle_key(KeyEvent::from(KeyCode::Char('?')), Instant::now());
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')), Time::ZERO);
         assert!(render(&app, 100, 30).contains("How to play"));
     }
 }

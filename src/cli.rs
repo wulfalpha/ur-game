@@ -1,18 +1,22 @@
 //! Command-line options.
 
-use crate::app::{App, Controller};
+use crate::app::{App, Controller, Time};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
-use std::time::Instant;
 use ur_game::ai::Difficulty;
 
 /// The Royal Game of Ur, one of the oldest known board games.
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Cli {
-    /// Use the terminal interface (the default; currently the only one).
-    #[arg(long)]
+    /// Play in the terminal instead of a window. This is automatic when
+    /// there's no display to open a window on, such as over SSH.
+    #[arg(long, conflicts_with = "gui")]
     pub tui: bool,
+
+    /// Open a window even where the terminal would be chosen automatically.
+    #[arg(long)]
+    pub gui: bool,
 
     /// Who plays Light, who moves first.
     #[arg(short, long, value_enum, value_name = "PLAYER", default_value_t = Seat::Human)]
@@ -68,9 +72,17 @@ impl From<Seat> for Controller {
 }
 
 impl Cli {
+    /// Whether to play in the terminal rather than open a window.
+    pub fn wants_terminal(&self) -> bool {
+        if self.tui || self.gui {
+            return self.tui;
+        }
+        !display_available(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
+    }
+
     /// Build the app these options describe. `default_seed` is used when no
     /// `--seed` was given; games are saved to `save_path` unless `--no-save`.
-    pub fn into_app(self, default_seed: u64, now: Instant, save_path: Option<PathBuf>) -> App {
+    pub fn into_app(self, default_seed: u64, now: Time, save_path: Option<PathBuf>) -> App {
         let mut app = App::new(self.seed.unwrap_or(default_seed));
         app.controllers = [self.light.into(), self.dark.into()];
         app.animations = !self.no_animation;
@@ -86,6 +98,19 @@ impl Cli {
         }
         app
     }
+}
+
+/// Can we open a window? Not over SSH (the window would appear on the far
+/// machine, if anywhere), and on Linux and the BSDs only with an X11 or
+/// Wayland display. `env_set` reports whether an environment variable is set.
+fn display_available(env_set: impl Fn(&str) -> bool) -> bool {
+    if env_set("SSH_CONNECTION") || env_set("SSH_TTY") {
+        return false;
+    }
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        return true;
+    }
+    env_set("DISPLAY") || env_set("WAYLAND_DISPLAY")
 }
 
 #[cfg(test)]
@@ -105,7 +130,7 @@ mod tests {
 
     #[test]
     fn defaults_match_the_menu() {
-        let app = parse(&[]).into_app(1, Instant::now(), None);
+        let app = parse(&[]).into_app(1, Time::ZERO, None);
         assert_eq!(app.screen, Screen::Menu);
         assert_eq!(
             app.controllers,
@@ -129,7 +154,7 @@ mod tests {
         ]);
         assert!(cli.tui);
         assert_eq!(cli.seed, Some(7));
-        let app = cli.into_app(1, Instant::now(), None);
+        let app = cli.into_app(1, Time::ZERO, None);
         assert_eq!(app.screen, Screen::Game);
         assert_eq!(
             app.controllers,
@@ -151,9 +176,9 @@ mod tests {
                 "--seed",
                 seed,
             ])
-            .into_app(0, Instant::now(), None);
+            .into_app(0, Time::ZERO, None);
             let mut app = app;
-            let mut now = Instant::now();
+            let mut now = Time::ZERO;
             for _ in 0..40 {
                 now += crate::app::PASS_DELAY;
                 app.update(now);
@@ -171,10 +196,10 @@ mod tests {
         // abandoned.
         let mut app = parse(&["-l", "easy", "-d", "hard", "-s", "--no-animation"]).into_app(
             9,
-            Instant::now(),
+            Time::ZERO,
             Some(path.clone()),
         );
-        let mut now = Instant::now();
+        let mut now = Time::ZERO;
         for _ in 0..12 {
             now += crate::app::PASS_DELAY;
             app.update(now);
@@ -183,15 +208,15 @@ mod tests {
 
         // Second run, with different players on the command line: the saved
         // game's players win.
-        let app = parse(&["-c"]).into_app(1, Instant::now(), Some(path.clone()));
+        let app = parse(&["-c"]).into_app(1, Time::ZERO, Some(path.clone()));
         assert_eq!(app.screen, Screen::Game);
         assert_eq!(app.game, saved.game);
         assert_eq!(app.controllers, saved.controllers);
 
         // --no-save ignores it; a plain run offers it in the menu.
-        let app = parse(&["--no-save"]).into_app(1, Instant::now(), Some(path.clone()));
+        let app = parse(&["--no-save"]).into_app(1, Time::ZERO, Some(path.clone()));
         assert!(app.resumable.is_none());
-        let app = parse(&[]).into_app(1, Instant::now(), Some(path.clone()));
+        let app = parse(&[]).into_app(1, Time::ZERO, Some(path.clone()));
         assert_eq!(app.menu_selected, crate::app::MenuItem::Continue);
         std::fs::remove_file(path).unwrap();
     }
@@ -199,7 +224,7 @@ mod tests {
     #[test]
     fn continue_without_a_save_starts_fresh() {
         let path = std::env::temp_dir().join("ur-game-cli-missing-save.txt");
-        let app = parse(&["-c"]).into_app(1, Instant::now(), Some(path));
+        let app = parse(&["-c"]).into_app(1, Time::ZERO, Some(path));
         assert_eq!(app.screen, Screen::Game);
         assert_eq!(app.game, ur_game::game::GameState::new());
     }
@@ -208,6 +233,21 @@ mod tests {
     fn rejects_conflicting_options() {
         assert!(Cli::try_parse_from(["ur-game", "-c", "-s"]).is_err());
         assert!(Cli::try_parse_from(["ur-game", "-c", "--no-save"]).is_err());
+    }
+
+    #[test]
+    fn chooses_terminal_or_window() {
+        let env = |vars: &'static [&'static str]| move |name: &str| vars.contains(&name);
+        assert!(!display_available(env(&["DISPLAY", "SSH_CONNECTION"])));
+        assert!(!display_available(env(&["WAYLAND_DISPLAY", "SSH_TTY"])));
+        if cfg!(target_os = "linux") {
+            assert!(display_available(env(&["DISPLAY"])));
+            assert!(display_available(env(&["WAYLAND_DISPLAY"])));
+            assert!(!display_available(env(&[])));
+        }
+        assert!(parse(&["--tui"]).wants_terminal());
+        assert!(!parse(&["--gui"]).wants_terminal());
+        assert!(Cli::try_parse_from(["ur-game", "--tui", "--gui"]).is_err());
     }
 
     #[test]

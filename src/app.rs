@@ -13,9 +13,14 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use ur_game::ai::{self, Difficulty};
 use ur_game::game::{FINISH, GameState, Move, Outcome, Player, START, roll_from_tips};
+
+/// A point in time, measured from when the program started. The front end
+/// supplies it, which keeps this module free of any particular clock (a
+/// browser build, for one, has no `std::time::Instant`).
+pub type Time = Duration;
 
 /// Pause before each computer action (roll, then move).
 pub const AI_DELAY: Duration = Duration::from_millis(700);
@@ -100,12 +105,16 @@ pub struct Dice {
 }
 
 /// Where an animating piece currently is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PieceAnimation {
     pub player: Player,
     pub mv: Move,
     /// Current path position, `mv.from + 1 ..= mv.to` (may be `FINISH`).
+    /// Hops square by square, for the terminal.
     pub pos: u8,
+    /// Squares travelled so far, `0.0 ..= steps`, moving smoothly: for
+    /// front ends that can draw a piece between squares.
+    pub travelled: f32,
     /// The piece has reached its destination.
     pub landed: bool,
     /// Landed on an enemy piece (capture flash).
@@ -142,13 +151,13 @@ pub enum Phase {
     /// The dice are tumbling; they will show `tips` when they settle.
     Rolling {
         tips: u8,
-        started: Instant,
+        started: Time,
     },
     /// A chosen move is being animated; it is applied when it finishes.
     Moving {
         roll: u8,
         option: MoveOption,
-        started: Instant,
+        started: Time,
     },
     /// Dice thrown but nothing can move; the turn passes shortly.
     NoMoves {
@@ -172,14 +181,14 @@ pub struct App {
     pub should_quit: bool,
     pub animations: bool,
     /// Time of the latest input or update; animations are drawn relative to it.
-    pub now: Instant,
+    pub now: Time,
     /// The game in progress (or saved from an earlier run) that "Continue"
     /// resumes. Kept up to date at every save point.
     pub resumable: Option<SavedGame>,
     /// Where to save; `None` keeps saves in memory only.
     save_path: Option<PathBuf>,
     save_failed: bool,
-    deadline: Option<Instant>,
+    deadline: Option<Time>,
     rng: StdRng,
 }
 
@@ -197,7 +206,7 @@ impl App {
             hint: None,
             should_quit: false,
             animations: true,
-            now: Instant::now(),
+            now: Time::ZERO,
             resumable: None,
             save_path: None,
             save_failed: false,
@@ -224,7 +233,7 @@ impl App {
     }
 
     /// When the app next wants [`update`](Self::update) called, if ever.
-    pub fn deadline(&self) -> Option<Instant> {
+    pub fn deadline(&self) -> Option<Time> {
         self.deadline
     }
 
@@ -283,7 +292,7 @@ impl App {
         let Phase::Rolling { tips, started } = self.phase else {
             return None;
         };
-        let elapsed = self.now.saturating_duration_since(started);
+        let elapsed = self.now.saturating_sub(started);
         if elapsed >= DICE_ROLL_TIME.mul_f32(0.8) {
             return Some((tips, true));
         }
@@ -305,13 +314,15 @@ impl App {
         };
         let mv = option.mv;
         let steps = (mv.to - mv.from) as u128;
-        let elapsed = self.now.saturating_duration_since(started).as_millis();
+        let elapsed = self.now.saturating_sub(started).as_millis();
         let k = (elapsed / STEP_TIME.as_millis() + 1).min(steps);
         let landed = k == steps;
+        let travelled = (elapsed as f32 / STEP_TIME.as_millis() as f32).min(steps as f32);
         Some(PieceAnimation {
             player: self.game.turn(),
             mv,
             pos: mv.from + k as u8,
+            travelled,
             landed,
             impact: landed && option.outcome.captured,
         })
@@ -321,7 +332,30 @@ impl App {
     // Input
     // ------------------------------------------------------------------
 
-    pub fn handle_key(&mut self, key: KeyEvent, now: Instant) {
+    /// Point the move cursor at option `index` (mouse hover). Only while a
+    /// human is choosing.
+    pub fn select_option(&mut self, index: usize) {
+        if !self.current_is_human() || self.show_help {
+            return;
+        }
+        if let Phase::Choosing {
+            options, selected, ..
+        } = &mut self.phase
+            && index < options.len()
+        {
+            *selected = index;
+        }
+    }
+
+    /// Play option `index` (mouse click). Only while a human is choosing.
+    pub fn play_option(&mut self, index: usize, now: Time) {
+        self.now = now;
+        if self.current_is_human() && !self.show_help && self.screen == Screen::Game {
+            self.play(index, now);
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent, now: Time) {
         self.now = now;
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -348,7 +382,7 @@ impl App {
         }
     }
 
-    fn menu_key(&mut self, code: KeyCode, now: Instant) {
+    fn menu_key(&mut self, code: KeyCode, now: Time) {
         let items = self.menu_items();
         let n = items.len();
         let i = items
@@ -384,7 +418,7 @@ impl App {
         }
     }
 
-    fn game_key(&mut self, code: KeyCode, now: Instant) {
+    fn game_key(&mut self, code: KeyCode, now: Time) {
         if code == KeyCode::Esc {
             self.screen = Screen::Menu;
             self.deadline = None;
@@ -457,7 +491,7 @@ impl App {
     // Time-driven progress (computer turns, auto-pass)
     // ------------------------------------------------------------------
 
-    pub fn update(&mut self, now: Instant) {
+    pub fn update(&mut self, now: Time) {
         self.now = now;
         if self.screen != Screen::Game || self.show_help {
             return;
@@ -469,7 +503,7 @@ impl App {
     }
 
     /// Take the next automatic step for the current phase.
-    fn advance(&mut self, now: Instant) {
+    fn advance(&mut self, now: Time) {
         match self.phase {
             Phase::AwaitRoll if !self.current_is_human() => self.roll(now),
             Phase::Choosing { selected, .. } if !self.current_is_human() => {
@@ -486,7 +520,7 @@ impl App {
     // Game flow
     // ------------------------------------------------------------------
 
-    pub fn new_game(&mut self, now: Instant) {
+    pub fn new_game(&mut self, now: Time) {
         self.screen = Screen::Game;
         self.game = GameState::new();
         self.dice = None;
@@ -501,7 +535,7 @@ impl App {
     }
 
     /// Pick up the saved game. Returns `false` if there is none.
-    pub fn resume(&mut self, now: Instant) -> bool {
+    pub fn resume(&mut self, now: Time) -> bool {
         let Some(saved) = self.resumable.clone() else {
             return false;
         };
@@ -519,13 +553,13 @@ impl App {
         true
     }
 
-    fn start_turn(&mut self, now: Instant) {
+    fn start_turn(&mut self, now: Time) {
         self.phase = Phase::AwaitRoll;
         self.deadline = (!self.current_is_human()).then(|| now + AI_DELAY);
         self.autosave(None);
     }
 
-    fn roll(&mut self, now: Instant) {
+    fn roll(&mut self, now: Time) {
         let tips = (self.rng.next_u32() & 0b1111) as u8;
         // Saved before anyone sees it, so quitting can't undo a bad throw.
         self.autosave(Some(tips));
@@ -538,7 +572,7 @@ impl App {
     }
 
     /// The dice have settled on `tips`: work out what the player can do.
-    fn resolve_roll(&mut self, tips: u8, now: Instant) {
+    fn resolve_roll(&mut self, tips: u8, now: Time) {
         self.hint = None;
         let player = self.game.turn();
         let roll = roll_from_tips(tips as u32);
@@ -587,7 +621,7 @@ impl App {
         self.deadline = (!self.current_is_human()).then(|| now + AI_DELAY);
     }
 
-    fn play(&mut self, index: usize, now: Instant) {
+    fn play(&mut self, index: usize, now: Time) {
         let Phase::Choosing {
             roll, ref options, ..
         } = self.phase
@@ -638,7 +672,7 @@ impl App {
     }
 
     /// Apply a move to the game and log it.
-    fn commit(&mut self, roll: u8, option: MoveOption, now: Instant) {
+    fn commit(&mut self, roll: u8, option: MoveOption, now: Time) {
         let mv = option.mv;
         let player = self.game.turn();
         let outcome = self
@@ -647,7 +681,7 @@ impl App {
             .expect("move came from legal_moves");
         let mut text = format!("{player} rolls {roll}: {}", describe_move(mv));
         if outcome.captured {
-            text.push_str(", captures!");
+            text.push_str(", captures");
         }
         if outcome.extra_turn {
             text.push_str(", rosette: rolls again");
@@ -665,7 +699,7 @@ impl App {
         }
     }
 
-    fn pass(&mut self, now: Instant) {
+    fn pass(&mut self, now: Time) {
         let Phase::NoMoves { roll } = self.phase else {
             return;
         };
@@ -745,11 +779,11 @@ mod tests {
     }
 
     /// A game in instant mode (no animations), for testing turn flow.
-    fn game_app(light: Controller, dark: Controller) -> (App, Instant) {
+    fn game_app(light: Controller, dark: Controller) -> (App, Time) {
         let mut app = App::new(42);
         app.controllers = [light, dark];
         app.animations = false;
-        let now = Instant::now();
+        let now = Time::ZERO;
         app.new_game(now);
         (app, now)
     }
@@ -757,7 +791,7 @@ mod tests {
     #[test]
     fn menu_cycles_controllers_and_starts() {
         let mut app = App::new(1);
-        let now = Instant::now();
+        let now = Time::ZERO;
         assert_eq!(app.screen, Screen::Menu);
         app.handle_key(key(KeyCode::Up), now); // Animation
         app.handle_key(key(KeyCode::Enter), now);
@@ -805,7 +839,7 @@ mod tests {
         app.screen = Screen::Game;
         // Light has two pieces in play, so most rolls give several options.
         app.game = GameState::from_positions(Player::Light, [3, 6, 0, 0, 0, 0, 0], [0; 7]).unwrap();
-        let now = Instant::now();
+        let now = Time::ZERO;
         let options: Vec<MoveOption> = app
             .game
             .legal_moves(1)
@@ -871,7 +905,7 @@ mod tests {
         assert_eq!(app.game, GameState::new());
     }
 
-    fn human_app_with_position(light: [u8; 7], dark: [u8; 7]) -> (App, Instant) {
+    fn human_app_with_position(light: [u8; 7], dark: [u8; 7]) -> (App, Time) {
         let (mut app, now) = game_app(Controller::Human, Controller::Human);
         app.animations = true;
         app.game = GameState::from_positions(Player::Light, light, dark).unwrap();
@@ -880,7 +914,7 @@ mod tests {
 
     /// Put the app into the move-choosing phase for `roll`, as if the dice
     /// had just settled on it.
-    fn force_roll(app: &mut App, roll: u8, now: Instant) {
+    fn force_roll(app: &mut App, roll: u8, now: Time) {
         let tips = (1u8 << roll) - 1; // `roll` marked dice
         app.resolve_roll(tips, now);
         assert!(matches!(app.phase, Phase::Choosing { .. }));
@@ -1038,12 +1072,12 @@ mod tests {
     #[test]
     fn quit_keys() {
         let mut app = App::new(0);
-        app.handle_key(key(KeyCode::Char('q')), Instant::now());
+        app.handle_key(key(KeyCode::Char('q')), Time::ZERO);
         assert!(app.should_quit);
         let mut app = App::new(0);
         app.handle_key(
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            Instant::now(),
+            Time::ZERO,
         );
         assert!(app.should_quit);
     }
@@ -1051,7 +1085,7 @@ mod tests {
     #[test]
     fn menu_offers_continue_only_with_a_game_to_resume() {
         let mut app = App::new(1);
-        let now = Instant::now();
+        let now = Time::ZERO;
         assert!(!app.menu_items().contains(&MenuItem::Continue));
         app.handle_key(key(KeyCode::Enter), now); // New game
         assert!(app.resumable.is_some(), "saved at the start of the turn");
@@ -1129,7 +1163,7 @@ mod tests {
         app.use_save_file(path.clone());
         app.controllers = [Controller::Human, Controller::Computer(Difficulty::Hard)];
         app.animations = false;
-        let now = Instant::now();
+        let now = Time::ZERO;
         app.new_game(now);
         app.handle_key(key(KeyCode::Char(' ')), now);
 
