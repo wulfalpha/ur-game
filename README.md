@@ -60,8 +60,8 @@ the middle rosette, is shared by both players.
 
 ## The pieces
 
-Each player has seven pieces. In the game they are shown as `●`, white for
-Light and red for Dark. Light moves first.
+Each player has seven pieces. In the game Light's are white circles `●` and
+Dark's are red diamonds `◆`. Light moves first.
 
 Pieces wait off the board until they enter, and are counted as home once
 they have been moved off the far end. The rows above and below the board

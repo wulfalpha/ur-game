@@ -52,8 +52,22 @@ pub fn mode_for(area: Rect) -> Option<Mode> {
     }
 }
 
-const PIECE: &str = "●";
-const GHOST: &str = "◌";
+/// Each side has its own shape as well as colour, so the pieces stay easy
+/// to tell apart whatever the terminal's palette (or the player's eyes).
+fn piece(p: Player) -> &'static str {
+    match p {
+        Player::Light => "●",
+        Player::Dark => "◆",
+    }
+}
+
+/// Outline of a piece: where a moving piece will land, or has just left.
+fn ghost(p: Player) -> &'static str {
+    match p {
+        Player::Light => "○",
+        Player::Dark => "◇",
+    }
+}
 const ROSETTE: &str = "✦";
 
 const ACCENT: Color = Color::Yellow;
@@ -73,8 +87,10 @@ const TILE_NUMBER: Color = Color::Rgb(165, 145, 115);
 
 fn player_color(p: Player) -> Color {
     match p {
-        Player::Light => Color::White,
-        Player::Dark => Color::LightRed,
+        // Shell-white and deep red, given as RGB so terminal themes can't
+        // wash them out to similar pastels.
+        Player::Light => Color::Rgb(245, 238, 220),
+        Player::Dark => Color::Rgb(230, 45, 45),
     }
 }
 
@@ -173,7 +189,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                     let value = app.controller(p).label();
                     Line::from(vec![
                         Span::styled(cursor, style),
-                        Span::styled(PIECE, Style::new().fg(player_color(p))),
+                        Span::styled(piece(p), Style::new().fg(player_color(p))),
                         Span::styled(format!(" {:<8}", p.to_string()), style),
                         Span::styled(format!("◀ {value:^18} ▶"), style),
                     ])
@@ -295,14 +311,14 @@ fn draw_game(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
 fn status_line(app: &App) -> Line<'static> {
     let turn = app.game.turn();
     let who = Span::styled(
-        format!("{PIECE} {turn}"),
+        format!("{} {turn}", piece(turn)),
         Style::new().fg(player_color(turn)).bold(),
     );
     let tail = match &app.phase {
         Phase::GameOver(w) => {
             return Line::from(vec![
                 Span::styled(
-                    format!("{PIECE} {w} wins!"),
+                    format!("{} {w} wins!", piece(*w)),
                     Style::new().fg(player_color(*w)).bold(),
                 ),
                 Span::raw("  Enter for a rematch, Esc for the menu"),
@@ -330,7 +346,7 @@ fn footer_hint(app: &App) -> &'static str {
     }
 }
 
-/// "● Light  ○○○○○ waiting      home ●●"
+/// "Light  ●●●●●  ⟶  home ●●" (Dark uses ◆)
 fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
     let color = player_color(player);
     let mine = app.game.turn() == player;
@@ -363,7 +379,7 @@ fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
                 } else {
                     Style::new().fg(color)
                 };
-                Span::styled(PIECE, style)
+                Span::styled(piece(player), style)
             })
             .collect();
         if n == 0 {
@@ -380,7 +396,7 @@ fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
     spans.push(Span::styled("  ⟶  home ", Style::new().fg(DIM)));
     spans.extend(pieces(finished, false));
     if home_hl {
-        spans.push(Span::styled(GHOST, Style::new().fg(TARGET).bold()));
+        spans.push(Span::styled(ghost(player), Style::new().fg(TARGET).bold()));
     }
     spans.push(Span::styled(
         format!(" {finished}/{PIECES_PER_PLAYER}"),
@@ -472,21 +488,21 @@ fn square_number(row: usize, col: usize) -> Option<u8> {
 }
 
 fn content_line(content: Content) -> Line<'static> {
-    let piece = |p: Player| Style::new().fg(player_color(p)).bold();
+    let style = |p: Player| Style::new().fg(player_color(p)).bold();
     match content {
         Content::Empty => Line::from(""),
         Content::Rosette => Line::from(Span::styled(ROSETTE, Style::new().fg(ROSETTE_COLOR))),
-        Content::Piece(p) | Content::Mover(p) => Line::from(Span::styled(PIECE, piece(p))),
-        Content::Ghost(p) => Line::from(Span::styled(GHOST, piece(p))),
+        Content::Piece(p) | Content::Mover(p) => Line::from(Span::styled(piece(p), style(p))),
+        Content::Ghost(p) => Line::from(Span::styled(ghost(p), style(p))),
         Content::Victim(p) => Line::from(Span::styled(
-            format!("{GHOST}{PIECE}"),
+            format!("{}{}", ghost(p), piece(p)),
             Style::new()
                 .fg(player_color(p))
                 .add_modifier(Modifier::CROSSED_OUT),
         )),
         Content::Strike(p) => Line::from(vec![
             Span::styled("⚔", Style::new().fg(Color::LightRed).bold()),
-            Span::styled(PIECE, piece(p)),
+            Span::styled(piece(p), style(p)),
         ]),
     }
 }
