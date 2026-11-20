@@ -150,6 +150,14 @@ When you ask for a hint, the cursor jumps to the Hard AI's choice, marked
 roughly one point per square of progress, so −2.5 is about two and a half
 squares worse. Hints are noted in the log.
 
+Each move also gets a short reason, shown for the highlighted move at the
+bottom of the move panel (next to the Hint button in the window). The
+recommended move says why it's good, such as "captures on 10" or "escapes
+63% danger". Moving the cursor to another move says what it gives up
+compared with it, such as "leaves 9 at 63% risk", "gives up mid rosette" or
+"misses extra throw". When the difference only shows up a few turns later,
+it says "weaker a few turns on".
+
 ### Sound
 
 Both the GUI and TUI play short effects for dice, piece hops, movement,

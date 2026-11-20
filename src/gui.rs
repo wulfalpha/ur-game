@@ -1063,6 +1063,19 @@ impl Ui<'_> {
             if self.button("Hint (H)", x + 14.0, hint_y, 120.0, 28.0, false) {
                 press(app, Key::Char('h'), now);
             }
+            if let Some((is_best, why)) = app.hint_reason() {
+                // Gold for the recommended move, which its row also tags "best".
+                let color = if is_best { ACCENT } else { TEXT };
+                self.text(
+                    why,
+                    x + 146.0,
+                    hint_y + 19.0,
+                    15.0,
+                    color,
+                    is_best,
+                    Align::Left,
+                );
+            }
         }
         if let Some(i) = clicked {
             app.play_option(i, now);

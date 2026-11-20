@@ -848,6 +848,11 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
         Phase::NoMoves { .. } => vec![ListItem::new("No legal move.").fg(DIM)],
         _ => vec![],
     };
+    let block = match app.hint_reason() {
+        Some((true, why)) => block.title_bottom(Line::from(format!(" ★ {why} ")).fg(ACCENT).bold()),
+        Some((false, why)) => block.title_bottom(Line::from(format!(" {why} ")).fg(TEXT)),
+        None => block,
+    };
     frame.render_widget(List::new(items).block(block), area);
 }
 
@@ -1091,6 +1096,15 @@ mod tests {
         for (w, h) in [(MIN_W, MIN_H), (COMPACT_MIN_W, COMPACT_MIN_H)] {
             let out = render(&app, w, h);
             assert!(out.contains("⚠31%"), "{w}×{h}:\n{out}");
+        }
+        app.hint = Some(crate::app::Hint {
+            best: 0,
+            loss: vec![0.0],
+            reasons: vec!["escapes 63% danger".into()],
+        });
+        for (w, h) in [(MIN_W, MIN_H), (COMPACT_MIN_W, COMPACT_MIN_H)] {
+            let out = render(&app, w, h);
+            assert!(out.contains("★ escapes 63% danger"), "{w}×{h}:\n{out}");
         }
         app.show_help = true;
         let out = render(&app, MIN_W, MIN_H);

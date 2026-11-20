@@ -17,7 +17,10 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use std::time::Duration;
 use ur_game::ai::{self, Difficulty};
-use ur_game::game::{FINISH, GameState, Move, Outcome, Player, START, roll_from_tips};
+use ur_game::game::{
+    FINISH, GameState, Move, Outcome, Player, ROLL_WAYS, SAFE_ROSETTE, START, is_shared,
+    roll_from_tips,
+};
 
 /// A point in time, measured from when the program started. The front end
 /// supplies it, which keeps this module free of any particular clock (a
@@ -131,6 +134,9 @@ pub struct Hint {
     /// How much worse than the best move each option is, in evaluation
     /// points (roughly one point per square of progress). `0.0` for the best.
     pub loss: Vec<f64>,
+    /// A few words on each option: why the best move is good, or what each
+    /// other move gives up compared with it.
+    pub reasons: Vec<String>,
 }
 
 /// A legal move together with what it would cause, for the move list.
@@ -794,20 +800,48 @@ impl App {
             .map(|(_, score)| score)
             .collect();
         let best = (0..scores.len()).fold(0, |b, i| if scores[i] > scores[b] { i } else { b });
-        let loss = scores.iter().map(|s| scores[best] - s).collect();
+        let loss: Vec<f64> = scores.iter().map(|s| scores[best] - s).collect();
         if let Phase::Choosing {
             options, selected, ..
         } = &mut self.phase
         {
             *selected = best;
+            let traits: Vec<Traits> = options
+                .iter()
+                .map(|o| Traits::of(&self.game, roll, o))
+                .collect();
+            let reasons: Vec<String> = (0..options.len())
+                .map(|i| {
+                    if i == best {
+                        traits[best].why_good()
+                    } else {
+                        traits[i].why_worse(&traits[best], loss[i])
+                    }
+                })
+                .collect();
             let text = format!(
-                "Hint for {}: {}.",
+                "Hint for {}: {} ({}).",
                 self.game.turn(),
-                describe_move(options[best].mv)
+                describe_move(options[best].mv),
+                reasons[best]
             );
-            self.hint = Some(Hint { best, loss });
+            self.hint = Some(Hint {
+                best,
+                loss,
+                reasons,
+            });
             self.push_log(text);
         }
+    }
+
+    /// The hint's reason for the highlighted move, and whether that move is
+    /// the recommended one. `None` without a hint.
+    pub fn hint_reason(&self) -> Option<(bool, &str)> {
+        let (Some(hint), Phase::Choosing { selected, .. }) = (&self.hint, &self.phase) else {
+            return None;
+        };
+        let reason = hint.reasons.get(*selected)?;
+        Some((*selected == hint.best, reason))
     }
 
     /// Apply a move to the game and log it.
@@ -902,6 +936,107 @@ fn mix(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
     x ^ (x >> 31)
+}
+
+/// What a move does, in the terms a hint explains it with.
+struct Traits {
+    mv: Move,
+    wins: bool,
+    captures: bool,
+    extra_turn: bool,
+    /// Capture risk (sixteenths) of the moving piece before and after.
+    risk_before: u8,
+    risk_after: u8,
+    /// Ways (sixteenths) the moved piece could hit an enemy piece ahead of
+    /// it on the mover's next throw.
+    threat: u8,
+}
+
+impl Traits {
+    fn of(game: &GameState, roll: u8, option: &MoveOption) -> Self {
+        let me = game.turn();
+        let mv = option.mv;
+        let mut after = *game;
+        after.apply(roll, mv).expect("legal move");
+        let threat = (1..=4u8)
+            .filter(|&d| {
+                let target = mv.to + d;
+                is_shared(target) && target != SAFE_ROSETTE && after.occupies(me.opponent(), target)
+            })
+            .map(|d| ROLL_WAYS[d as usize])
+            .sum();
+        Traits {
+            mv,
+            wins: option.outcome.winner.is_some(),
+            captures: option.outcome.captured,
+            extra_turn: option.outcome.extra_turn,
+            risk_before: game.capture_ways(me, mv.from),
+            risk_after: option.risk,
+            threat,
+        }
+    }
+
+    fn escapes(&self) -> bool {
+        self.risk_before > 0 && self.risk_after < self.risk_before
+    }
+
+    /// Why the recommended move is good: its most important effect.
+    fn why_good(&self) -> String {
+        if self.wins {
+            "wins the game".into()
+        } else if self.captures {
+            format!("captures on {}", self.mv.to)
+        } else if self.escapes() {
+            format!("escapes {}% danger", risk_percent(self.risk_before))
+        } else if self.mv.to == SAFE_ROSETTE {
+            "takes middle rosette".into()
+        } else if self.extra_turn {
+            "extra throw".into()
+        } else if self.mv.to == FINISH {
+            "bears a piece off".into()
+        } else if self.threat > 0 && self.risk_after == 0 {
+            format!("sets up a {}% hit", risk_percent(self.threat))
+        } else if self.risk_after == 0 {
+            "safe progress".into()
+        } else {
+            "least risky choice".into()
+        }
+    }
+
+    /// What this move gives up compared with the recommended `best`.
+    fn why_worse(&self, best: &Traits, loss: f64) -> String {
+        if loss < 0.5 {
+            "nearly as good".into()
+        } else if best.wins && !self.wins {
+            "misses the win".into()
+        } else if best.captures && !self.captures {
+            format!("misses capture on {}", best.mv.to)
+        } else if self.mv.from == SAFE_ROSETTE && best.mv.from != SAFE_ROSETTE {
+            "gives up mid rosette".into()
+        } else if best.escapes() && self.mv.from != best.mv.from {
+            format!(
+                "leaves {} at {}% risk",
+                best.mv.from,
+                risk_percent(best.risk_before)
+            )
+        } else if self.risk_after > best.risk_after {
+            format!("{}% risk of capture", risk_percent(self.risk_after))
+        } else if best.mv.to == SAFE_ROSETTE && self.mv.to != SAFE_ROSETTE {
+            "misses middle rosette".into()
+        } else if best.extra_turn && !self.extra_turn {
+            "misses extra throw".into()
+        } else if best.mv.to == FINISH && self.mv.to != FINISH {
+            "doesn't bear off".into()
+        } else if best.threat > self.threat {
+            if self.threat == 0 {
+                "sets up no hit".into()
+            } else {
+                "weaker hit chance".into()
+            }
+        } else {
+            "weaker a few turns on".into()
+        }
+    }
 }
 
 /// Human-readable move, using the mover's path square numbers.
@@ -1081,6 +1216,47 @@ mod tests {
         assert_eq!(app.game.waiting(mover), 6);
         assert!(app.game.occupies(mover, opt.mv.to));
         assert!(app.log.last().unwrap().contains("enters a piece"));
+    }
+
+    /// Light to move with `roll`, a hint requested; returns the app.
+    fn hinted(light: [u8; 7], dark: [u8; 7], roll: u8) -> App {
+        let mut app = App::new(1);
+        app.animations = false;
+        app.controllers = [Controller::Human, Controller::Human];
+        app.screen = Screen::Game;
+        app.game = GameState::from_positions(Player::Light, light, dark).unwrap();
+        app.resolve_roll((1u8 << roll) - 1, Time::ZERO);
+        app.handle_key(key(KeyCode::Char('h')), Time::ZERO);
+        app
+    }
+
+    fn reason_for(app: &App, to: u8) -> String {
+        let hint = app.hint.as_ref().unwrap();
+        let i = app.options().iter().position(|o| o.mv.to == to).unwrap();
+        hint.reasons[i].clone()
+    }
+
+    #[test]
+    fn hint_explains_running_from_danger() {
+        // Dark on 7 and 6 can hit Light's piece on 9 with a 2 or a 3.
+        let app = hinted([9, 0, 0, 0, 0, 0, 0], [7, 6, 0, 0, 0, 0, 0], 3);
+        assert_eq!(app.hint_reason(), Some((true, "escapes 63% danger")));
+        assert_eq!(reason_for(&app, 3), "leaves 9 at 63% risk");
+        assert!(app.log.last().unwrap().contains("(escapes 63% danger)"));
+    }
+
+    #[test]
+    fn hint_explains_a_missed_capture() {
+        let app = hinted([7, 0, 0, 0, 0, 0, 0], [10, 0, 0, 0, 0, 0, 0], 3);
+        assert_eq!(app.hint_reason(), Some((true, "captures on 10")));
+        assert_eq!(reason_for(&app, 3), "misses capture on 10");
+    }
+
+    #[test]
+    fn hint_reason_follows_the_cursor() {
+        let mut app = hinted([9, 0, 0, 0, 0, 0, 0], [7, 6, 0, 0, 0, 0, 0], 3);
+        app.handle_key(key(KeyCode::Right), Time::ZERO);
+        assert_eq!(app.hint_reason(), Some((false, "leaves 9 at 63% risk")));
     }
 
     #[test]
