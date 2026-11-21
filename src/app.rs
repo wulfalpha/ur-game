@@ -47,6 +47,12 @@ const LOG_CAPACITY: usize = 2000;
 pub const LOG_SCROLL_STEP: usize = 3;
 /// The hint key asks this level for advice.
 pub const HINT_LEVEL: Difficulty = Difficulty::Hard;
+/// In a review, a move giving up less than this (in evaluation points,
+/// about a square of progress each) is as good as the best. The hint
+/// reasons say "nearly as good" below it too.
+const GOOD_LOSS: f64 = 0.5;
+/// …and one giving up this much or more is a mistake.
+const MISTAKE_LOSS: f64 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Controller {
@@ -159,6 +165,109 @@ pub struct Hint {
     pub reasons: Vec<String>,
 }
 
+/// One move choice a human made, kept so the game can be reviewed after it
+/// ends. Forced moves (only one legal option) aren't kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Decision {
+    /// The throw's number in the Chronicle.
+    pub throw: u32,
+    /// The position before the move, with the mover to play.
+    pub game: GameState,
+    /// The dice as thrown.
+    pub tips: u8,
+    pub mv: Move,
+}
+
+/// How a reviewed move compares with the strongest one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Grade {
+    /// The move the hint engine would have played.
+    Best,
+    /// Within half a point of it.
+    Good,
+    /// Gives up a little.
+    Inaccuracy,
+    /// Gives up a lot: a missed win or capture, or a piece left hanging.
+    Mistake,
+}
+
+impl Grade {
+    pub const ALL: [Grade; 4] = [Grade::Best, Grade::Good, Grade::Inaccuracy, Grade::Mistake];
+
+    fn of(played: usize, hint: &Hint) -> Grade {
+        let loss = hint.loss[played];
+        if played == hint.best {
+            Grade::Best
+        } else if loss < GOOD_LOSS {
+            Grade::Good
+        } else if loss < MISTAKE_LOSS {
+            Grade::Inaccuracy
+        } else {
+            Grade::Mistake
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Grade::Best => "best",
+            Grade::Good => "good",
+            Grade::Inaccuracy => "inaccuracy",
+            Grade::Mistake => "mistake",
+        }
+    }
+
+    /// "3 inaccuracies", "1 mistake".
+    pub fn count(self, n: usize) -> String {
+        match (self, n) {
+            (Grade::Inaccuracy, 1) => "1 inaccuracy".into(),
+            (Grade::Inaccuracy, n) => format!("{n} inaccuracies"),
+            (Grade::Mistake, 1) => "1 mistake".into(),
+            (Grade::Mistake, n) => format!("{n} mistakes"),
+            (g, n) => format!("{n} {}", g.label()),
+        }
+    }
+}
+
+/// A reviewed decision: every option, as a hint would have rated them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewStep {
+    pub decision: Decision,
+    pub options: Vec<MoveOption>,
+    /// Index into `options` of the move that was played.
+    pub played: usize,
+    pub hint: Hint,
+    pub grade: Grade,
+}
+
+/// Stepping back through a finished game's decisions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Review {
+    pub steps: Vec<ReviewStep>,
+    /// The step on show.
+    pub index: usize,
+    /// The finished game, to return to afterwards.
+    end: (GameState, Phase, Option<Dice>),
+}
+
+impl Review {
+    pub fn step(&self) -> &ReviewStep {
+        &self.steps[self.index]
+    }
+
+    /// How many of `player`'s moves earned each grade, in [`Grade::ALL`] order.
+    pub fn grades(&self, player: Player) -> [usize; 4] {
+        let mut n = [0; 4];
+        for s in self
+            .steps
+            .iter()
+            .filter(|s| s.decision.game.turn() == player)
+        {
+            n[s.grade as usize] += 1;
+        }
+        n
+    }
+}
+
 /// A legal move together with what it would cause, for the move list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MoveOption {
@@ -221,6 +330,10 @@ pub struct App {
     pub show_help: bool,
     /// Advice shown for the current move choice, if the player asked.
     pub hint: Option<Hint>,
+    /// The humans' move choices this game, for the review.
+    pub decisions: Vec<Decision>,
+    /// The finished game being reviewed, if any.
+    pub review: Option<Review>,
     pub should_quit: bool,
     pub animations: bool,
     pub sound_enabled: bool,
@@ -265,6 +378,8 @@ impl App {
             chronicle_dir: None,
             show_help: false,
             hint: None,
+            decisions: Vec::new(),
+            review: None,
             should_quit: false,
             animations: true,
             sound_enabled: true,
@@ -625,6 +740,9 @@ impl App {
     }
 
     fn game_key(&mut self, code: KeyCode, now: Time) {
+        if self.review.is_some() {
+            return self.review_key(code);
+        }
         if code == KeyCode::Esc {
             self.screen = Screen::Menu;
             self.deadline = None;
@@ -650,6 +768,8 @@ impl App {
             Phase::GameOver(_) => {
                 if confirm || code == KeyCode::Char('n') {
                     self.new_game(now);
+                } else if code == KeyCode::Char('v') {
+                    self.start_review();
                 }
             }
             // Space/Enter skips an animation, for anyone.
@@ -812,6 +932,8 @@ impl App {
         self.log_scroll = 0;
         self.tally = [Tally::default(); 2];
         self.hint = None;
+        self.decisions.clear();
+        self.review = None;
         self.push_log(format!(
             "New game: Light ({}) vs Dark ({}).",
             self.controllers[0].label(),
@@ -841,6 +963,8 @@ impl App {
         self.log = saved.log;
         self.log_scroll = 0;
         self.tally = saved.tally;
+        self.decisions = saved.decisions;
+        self.review = None;
         self.dice = None;
         self.hint = None;
         match saved.pending_tips {
@@ -898,15 +1022,7 @@ impl App {
             return;
         }
 
-        let options: Vec<MoveOption> = moves
-            .iter()
-            .map(|&mv| {
-                let mut preview = self.game;
-                let outcome = preview.apply(roll, mv).expect("legal move");
-                let risk = preview.capture_ways(player, mv.to);
-                MoveOption { mv, outcome, risk }
-            })
-            .collect();
+        let options = move_options(&self.game, roll);
         let selected = match self.controller(player) {
             Controller::Human => 0,
             Controller::Computer(d) => {
@@ -935,6 +1051,10 @@ impl App {
         let Some(&option) = options.get(index) else {
             return;
         };
+        if self.review.is_some() {
+            // Reviewing: a click only picks which option to read about.
+            return self.select_option(index);
+        }
         self.hint = None;
         self.sound_step = 0;
         if self.animations {
@@ -951,50 +1071,24 @@ impl App {
 
     /// Ask the AI to rate every option, and move the cursor to its pick.
     fn show_hint(&mut self) {
-        let Phase::Choosing { roll, .. } = self.phase else {
+        let Phase::Choosing { roll, options, .. } = &self.phase else {
             return;
         };
-        // Same order as `options`: both come from `legal_moves`.
-        let scores: Vec<f64> = ai::rank_moves(&self.game, roll, HINT_LEVEL)
-            .into_iter()
-            .map(|(_, score)| score)
-            .collect();
-        let best = (0..scores.len()).fold(0, |b, i| if scores[i] > scores[b] { i } else { b });
-        let loss: Vec<f64> = scores.iter().map(|s| scores[best] - s).collect();
-        if let Phase::Choosing {
-            options, selected, ..
-        } = &mut self.phase
-        {
-            *selected = best;
-            let traits: Vec<Traits> = options
-                .iter()
-                .map(|o| Traits::of(&self.game, roll, o))
-                .collect();
-            let reasons: Vec<String> = (0..options.len())
-                .map(|i| {
-                    if i == best {
-                        traits[best].why_good()
-                    } else {
-                        traits[i].why_worse(&traits[best], loss[i])
-                    }
-                })
-                .collect();
-            let text = format!(
-                "Hint for {}: {} ({}).",
-                self.game.turn(),
-                describe_move(options[best].mv),
-                reasons[best]
-            );
-            if self.hint.is_none() {
-                self.tally[self.game.turn().index()].hints += 1;
-            }
-            self.hint = Some(Hint {
-                best,
-                loss,
-                reasons,
-            });
-            self.push_log(text);
+        let hint = analyse(&self.game, *roll, options);
+        let text = format!(
+            "Hint for {}: {} ({}).",
+            self.game.turn(),
+            describe_move(options[hint.best].mv),
+            hint.reasons[hint.best]
+        );
+        if let Phase::Choosing { selected, .. } = &mut self.phase {
+            *selected = hint.best;
         }
+        if self.hint.is_none() {
+            self.tally[self.game.turn().index()].hints += 1;
+        }
+        self.hint = Some(hint);
+        self.push_log(text);
     }
 
     /// The hint's reason for the highlighted move, and whether that move is
@@ -1011,6 +1105,17 @@ impl App {
     fn commit(&mut self, roll: u8, option: MoveOption, now: Time) {
         let mv = option.mv;
         let player = self.game.turn();
+        if self.current_is_human()
+            && let Some(dice) = self.dice
+            && self.game.legal_moves(roll).len() > 1
+        {
+            self.decisions.push(Decision {
+                throw: self.throw_number(),
+                game: self.game,
+                tips: dice.tips,
+                mv,
+            });
+        }
         let outcome = self
             .game
             .apply(roll, mv)
@@ -1041,6 +1146,154 @@ impl App {
             self.clear_save();
         } else {
             self.start_turn(now);
+        }
+    }
+
+    /// Step back through the finished game's decisions, each rated as a
+    /// hint would have. Returns `false` if there is nothing to review.
+    pub fn start_review(&mut self) -> bool {
+        if self.review.is_some() || !matches!(self.phase, Phase::GameOver(_)) {
+            return false;
+        }
+        let steps: Vec<ReviewStep> = self
+            .decisions
+            .iter()
+            .filter_map(|&decision| {
+                let roll = roll_from_tips(decision.tips.into());
+                let options = move_options(&decision.game, roll);
+                let played = options.iter().position(|o| o.mv == decision.mv)?;
+                let hint = analyse(&decision.game, roll, &options);
+                let grade = Grade::of(played, &hint);
+                Some(ReviewStep {
+                    decision,
+                    options,
+                    played,
+                    hint,
+                    grade,
+                })
+            })
+            .collect();
+        if steps.is_empty() {
+            return false;
+        }
+        let review = Review {
+            steps,
+            index: 0,
+            end: (self.game, self.phase.clone(), self.dice),
+        };
+        // Sum each human's play up in the Chronicle, once per game.
+        let summarised = self.log.iter().any(|l| l.starts_with("Review of "));
+        let lines: Vec<String> = Player::ALL
+            .into_iter()
+            .filter(|&p| self.controller(p) == Controller::Human)
+            .filter_map(|p| {
+                let n = review.grades(p);
+                let total: usize = n.iter().sum();
+                (total > 0).then(|| {
+                    let parts: Vec<String> = Grade::ALL
+                        .into_iter()
+                        .filter(|&g| n[g as usize] > 0)
+                        .map(|g| g.count(n[g as usize]))
+                        .collect();
+                    format!("Review of {p}'s {total} choices: {}.", parts.join(", "))
+                })
+            })
+            .collect();
+        self.review = Some(review);
+        if !summarised {
+            for line in lines {
+                self.push_log(line);
+            }
+        }
+        self.show_review_step(0);
+        true
+    }
+
+    /// Put step `index` of the review on the board.
+    fn show_review_step(&mut self, index: usize) {
+        let Some(review) = &mut self.review else {
+            return;
+        };
+        review.index = index.min(review.steps.len() - 1);
+        let step = review.step().clone();
+        let d = step.decision;
+        let roll = roll_from_tips(d.tips.into());
+        self.game = d.game;
+        self.dice = Some(Dice {
+            player: d.game.turn(),
+            tips: d.tips,
+            value: roll,
+        });
+        self.phase = Phase::Choosing {
+            roll,
+            options: step.options,
+            selected: step.played,
+        };
+        self.hint = Some(step.hint);
+        self.deadline = None;
+        // Bring the throw's Chronicle entry to the bottom of the view.
+        let entry = format!("{}. ", d.throw);
+        if let Some(i) = self.log.iter().rposition(|l| l.starts_with(&entry)) {
+            self.log_scroll = self.log.len() - 1 - i;
+        }
+    }
+
+    /// Move through the review: by one step, or to the next or previous
+    /// inaccuracy or mistake.
+    fn review_step_by(&mut self, step: isize, slips_only: bool) {
+        let Some(review) = &self.review else {
+            return;
+        };
+        let n = review.steps.len() as isize;
+        let mut i = review.index as isize;
+        loop {
+            i += step;
+            if !(0..n).contains(&i) {
+                return; // nothing further that way
+            }
+            if !slips_only || review.steps[i as usize].grade >= Grade::Inaccuracy {
+                break;
+            }
+        }
+        self.show_review_step(i as usize);
+    }
+
+    /// Back to the finished game.
+    pub fn leave_review(&mut self) {
+        let Some(review) = self.review.take() else {
+            return;
+        };
+        (self.game, self.phase, self.dice) = review.end;
+        self.hint = None;
+        self.log_scroll = 0;
+    }
+
+    /// The move played at the review step on show.
+    pub fn review_played(&self) -> Option<usize> {
+        self.review.as_ref().map(|r| r.step().played)
+    }
+
+    fn review_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('v') => self.leave_review(),
+            KeyCode::Left | KeyCode::Char('p') => self.review_step_by(-1, false),
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => self.review_step_by(1, false),
+            KeyCode::Tab => self.review_step_by(1, true),
+            KeyCode::BackTab => self.review_step_by(-1, true),
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('k') | KeyCode::Char('j') => {
+                if let Phase::Choosing {
+                    options, selected, ..
+                } = &mut self.phase
+                {
+                    let n = options.len();
+                    let up = matches!(code, KeyCode::Up | KeyCode::Char('k'));
+                    *selected = (*selected + if up { n - 1 } else { 1 }) % n;
+                }
+            }
+            KeyCode::PageUp | KeyCode::Char('[') => self.scroll_log(LOG_SCROLL_STEP as isize),
+            KeyCode::PageDown | KeyCode::Char(']') => self.scroll_log(-(LOG_SCROLL_STEP as isize)),
+            KeyCode::Char('e') => self.share_chronicle(),
+            _ => {}
         }
     }
 
@@ -1115,6 +1368,7 @@ impl App {
             pending_tips,
             log: self.log.clone(),
             tally: self.tally,
+            decisions: self.decisions.clone(),
         };
         if let Some(path) = &self.save_path
             && let Err(e) = save::store(path, &saved)
@@ -1145,6 +1399,46 @@ impl App {
             self.log.remove(0);
         }
         self.log_scroll = self.log_scroll.min(self.log.len().saturating_sub(1));
+    }
+}
+
+/// Every legal move for `roll`, with what each would cause.
+fn move_options(game: &GameState, roll: u8) -> Vec<MoveOption> {
+    let player = game.turn();
+    game.legal_moves(roll)
+        .into_iter()
+        .map(|mv| {
+            let mut preview = *game;
+            let outcome = preview.apply(roll, mv).expect("legal move");
+            let risk = preview.capture_ways(player, mv.to);
+            MoveOption { mv, outcome, risk }
+        })
+        .collect()
+}
+
+/// Rate every option as the hint engine sees it, with a reason for each.
+fn analyse(game: &GameState, roll: u8, options: &[MoveOption]) -> Hint {
+    // Same order as `options`: both come from `legal_moves`.
+    let scores: Vec<f64> = ai::rank_moves(game, roll, HINT_LEVEL)
+        .into_iter()
+        .map(|(_, score)| score)
+        .collect();
+    let best = (0..scores.len()).fold(0, |b, i| if scores[i] > scores[b] { i } else { b });
+    let loss: Vec<f64> = scores.iter().map(|s| scores[best] - s).collect();
+    let traits: Vec<Traits> = options.iter().map(|o| Traits::of(game, roll, o)).collect();
+    let reasons = (0..options.len())
+        .map(|i| {
+            if i == best {
+                traits[best].why_good()
+            } else {
+                traits[i].why_worse(&traits[best], loss[i])
+            }
+        })
+        .collect();
+    Hint {
+        best,
+        loss,
+        reasons,
     }
 }
 
@@ -1233,7 +1527,7 @@ impl Traits {
 
     /// What this move gives up compared with the recommended `best`.
     fn why_worse(&self, best: &Traits, loss: f64) -> String {
-        if loss < 0.5 {
+        if loss < GOOD_LOSS {
             "nearly as good".into()
         } else if best.wins && !self.wins {
             "misses the win".into()
@@ -1692,6 +1986,116 @@ mod tests {
         friends.handle_key(key(KeyCode::Enter), now);
         friends.update(now + PASS_DELAY);
         assert_eq!(friends.forfeit_level(), None);
+    }
+
+    #[test]
+    fn finished_games_can_be_reviewed_move_by_move() {
+        let (mut app, now) = game_app(Controller::Human, Controller::Computer(Difficulty::Hard));
+        // Nothing to review mid-game.
+        assert!(!app.start_review());
+        let winner = play_out(&mut app, now);
+        // Only the human's real choices are kept, never forced moves.
+        assert!(!app.decisions.is_empty());
+        for d in &app.decisions {
+            assert_eq!(d.game.turn(), Player::Light);
+            assert!(d.game.legal_moves(roll_from_tips(d.tips.into())).len() > 1);
+        }
+        let end_game = app.game;
+        let log_len = app.log.len();
+
+        app.handle_key(key(KeyCode::Char('v')), now);
+        let review = app.review.clone().expect("review started");
+        assert_eq!(review.steps.len(), app.decisions.len());
+        assert_eq!(review.index, 0);
+        // The first decision is on the board, with the played move selected
+        // and every option rated.
+        let first = &review.steps[0];
+        assert_eq!(app.game, first.decision.game);
+        assert_eq!(app.review_played(), Some(first.played));
+        assert!(matches!(app.phase, Phase::Choosing { selected, .. } if selected == first.played));
+        assert_eq!(app.hint.as_ref(), Some(&first.hint));
+        assert!(app.hint_reason().is_some());
+        assert_eq!(
+            app.log[app.log.len() - 1 - app.log_scroll],
+            app.log
+                .iter()
+                .find(|l| l.starts_with(&format!("{}. Light rolls", first.decision.throw)))
+                .unwrap()
+                .clone()
+        );
+        // The Chronicle sums it up once.
+        let summary = app
+            .log
+            .iter()
+            .filter(|l| l.starts_with("Review of Light's"))
+            .count();
+        assert_eq!(summary, 1);
+        assert_eq!(app.log.len(), log_len + 1);
+
+        // Grades follow the hint's losses.
+        for s in &review.steps {
+            let loss = s.hint.loss[s.played];
+            let expected = if s.played == s.hint.best {
+                Grade::Best
+            } else if loss < GOOD_LOSS {
+                Grade::Good
+            } else if loss < MISTAKE_LOSS {
+                Grade::Inaccuracy
+            } else {
+                Grade::Mistake
+            };
+            assert_eq!(s.grade, expected);
+        }
+
+        // Step through; playing a move does nothing but select it.
+        app.handle_key(key(KeyCode::Right), now);
+        assert_eq!(
+            app.review.as_ref().unwrap().index,
+            1.min(review.steps.len() - 1)
+        );
+        app.handle_key(key(KeyCode::Left), now);
+        app.handle_key(key(KeyCode::Left), now);
+        assert_eq!(app.review.as_ref().unwrap().index, 0);
+        app.handle_key(key(KeyCode::Down), now);
+        app.handle_key(key(KeyCode::Char('1')), now);
+        assert_eq!(app.game, first.decision.game);
+        // Tab finds the next slip, if there is one.
+        app.handle_key(key(KeyCode::Tab), now);
+        let at = app.review.as_ref().unwrap().index;
+        let next_slip = review.steps[1..]
+            .iter()
+            .position(|s| s.grade >= Grade::Inaccuracy)
+            .map_or(0, |i| i + 1);
+        assert_eq!(at, next_slip);
+
+        // Leaving puts the finished game back; reviewing again doesn't
+        // repeat the summary.
+        app.handle_key(key(KeyCode::Esc), now);
+        assert!(app.review.is_none());
+        assert_eq!(app.game, end_game);
+        assert_eq!(app.phase, Phase::GameOver(winner));
+        assert_eq!(app.screen, Screen::Game);
+        app.handle_key(key(KeyCode::Char('v')), now);
+        app.handle_key(key(KeyCode::Esc), now);
+        assert_eq!(app.log.len(), log_len + 1);
+
+        // A new game starts with a clean slate.
+        app.handle_key(key(KeyCode::Enter), now);
+        assert!(app.decisions.is_empty() && app.review.is_none());
+    }
+
+    #[test]
+    fn computer_games_have_nothing_to_review() {
+        let (mut app, mut now) = game_app(
+            Controller::Computer(Difficulty::Easy),
+            Controller::Computer(Difficulty::Easy),
+        );
+        while !matches!(app.phase, Phase::GameOver(_)) {
+            now += PASS_DELAY;
+            app.update(now);
+        }
+        assert!(app.decisions.is_empty());
+        assert!(!app.start_review());
     }
 
     #[test]

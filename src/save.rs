@@ -15,6 +15,7 @@
 //! dice 5
 //! tally light 12 25 1 3 0
 //! tally dark 11 20 0 2 0
+//! decision 3 light 7 0 3 0 0 0 0 0 0 2 0 0 0 0 0 0 0
 //! log New game: Light (Human) vs Dark (Computer · Medium).
 //! log Light rolls 2: enters a piece on 2.
 //! ```
@@ -22,14 +23,17 @@
 //! `dice` is only present when the dice have been thrown but the throw not
 //! yet played; it holds the four tips as bits. `tally` holds each player's
 //! throws, sum of throws, captures, rosettes and hints so far (missing in
-//! older saves, which then count from zero).
+//! older saves, which then count from zero). Each `decision` is a move
+//! choice a human made, for the review at the end: the throw number, the
+//! player to move, the dice tips, the move (from, to), then the position as
+//! Light's seven piece positions and Dark's.
 
-use crate::app::{Controller, Tally};
+use crate::app::{Controller, Decision, Tally};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use ur_game::ai::Difficulty;
-use ur_game::game::{FINISH, GameState, PIECES_PER_PLAYER, Player, START};
+use ur_game::game::{FINISH, GameState, Move, PIECES_PER_PLAYER, Player, START, roll_from_tips};
 
 const HEADER: &str = "ur-game save 1";
 
@@ -43,6 +47,8 @@ pub struct SavedGame {
     pub log: Vec<String>,
     /// Each player's running totals, Light first.
     pub tally: [Tally; 2],
+    /// The humans' move choices so far.
+    pub decisions: Vec<Decision>,
 }
 
 /// Where the game is saved: the per-user data folder
@@ -108,6 +114,19 @@ impl SavedGame {
                 t.hints
             );
         }
+        for d in &self.decisions {
+            let mut fields = vec![
+                d.throw.to_string(),
+                player_name(d.game.turn()).to_string(),
+                d.tips.to_string(),
+                d.mv.from.to_string(),
+                d.mv.to.to_string(),
+            ];
+            for player in Player::ALL {
+                fields.extend(positions(&d.game, player).iter().map(u8::to_string));
+            }
+            out += &format!("decision {}\n", fields.join(" "));
+        }
         for line in &self.log {
             // Log lines never contain newlines, but don't let one corrupt
             // the file if they ever do.
@@ -127,6 +146,7 @@ impl SavedGame {
         let mut pending_tips = None;
         let mut log = Vec::new();
         let mut tally = [Tally::default(); 2];
+        let mut decisions = Vec::new();
         for line in lines {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
@@ -156,6 +176,7 @@ impl SavedGame {
                         hints,
                     };
                 }
+                "decision" => decisions.push(parse_decision(value)?),
                 "log" => log.push(value.to_string()),
                 _ => return None,
             }
@@ -170,8 +191,43 @@ impl SavedGame {
             pending_tips,
             log,
             tally,
+            decisions,
         })
     }
+}
+
+/// `throw player tips from to` then fourteen piece positions.
+fn parse_decision(text: &str) -> Option<Decision> {
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    let [throw, turn, tips, from, to, rest @ ..] = &fields[..] else {
+        return None;
+    };
+    let n = PIECES_PER_PLAYER as usize;
+    if rest.len() != 2 * n {
+        return None;
+    }
+    let pieces = |part: &[&str]| parse_positions(&part.join(" "));
+    let game = GameState::from_positions(
+        parse_player(turn)?,
+        pieces(&rest[..n])?,
+        pieces(&rest[n..])?,
+    )
+    .ok()?;
+    let tips: u8 = tips.parse().ok().filter(|&t| t < 16)?;
+    let mv = Move {
+        from: from.parse().ok()?,
+        to: to.parse().ok()?,
+    };
+    // Only a move that was legal there can be reviewed.
+    if !game.legal_moves(roll_from_tips(tips.into())).contains(&mv) {
+        return None;
+    }
+    Some(Decision {
+        throw: throw.parse().ok()?,
+        game,
+        tips,
+        mv,
+    })
 }
 
 /// Every piece's path position (`START` waiting, `FINISH` borne off).
@@ -246,6 +302,13 @@ mod tests {
                     ..Tally::default()
                 },
             ],
+            decisions: vec![Decision {
+                throw: 3,
+                game: GameState::from_positions(Player::Light, [0, 0, 0, 0, 0, 0, 2], [0; 7])
+                    .unwrap(),
+                tips: 0b0111,
+                mv: Move { from: 0, to: 3 },
+            }],
         }
     }
 
@@ -287,6 +350,8 @@ mod tests {
             good.replace("tally light 12 25 1 3 2", "tally light 12 25 1 3"),
             good.replace("tally light 12 25 1 3 2", "tally purple 12 25 1 3 2"),
             good.replace("turn dark\n", ""),
+            good.replace("decision 3 light 7 0 3", "decision 3 light 7 0 4"), // illegal move
+            good.replace("decision 3 light 7 0 3", "decision 3 light 7 0"),
             good + "nonsense line\n",
         ] {
             assert_eq!(SavedGame::from_text(&bad), None, "accepted:\n{bad}");

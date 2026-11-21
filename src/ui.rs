@@ -1,7 +1,8 @@
 //! Rendering. Reads `App`, never mutates it.
 
 use crate::app::{
-    App, Controller, Dice, MenuItem, Phase, Screen, describe_move, entry_player, risk_percent,
+    App, Controller, Dice, Grade, MenuItem, Phase, Screen, describe_move, entry_player,
+    risk_percent,
 };
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -405,6 +406,33 @@ fn draw_game(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
 
 fn status_line(app: &App) -> Line<'static> {
     let turn = app.game.turn();
+    if let Some(review) = &app.review {
+        let step = review.step();
+        let grade = match step.grade {
+            Grade::Best => Span::styled("best move", Style::new().fg(ACCENT).bold()),
+            g => Span::styled(
+                format!("{} −{:.1}", g.label(), step.hint.loss[step.played]),
+                Style::new().fg(grade_color(g)).bold(),
+            ),
+        };
+        return Line::from(vec![
+            Span::raw(format!(
+                "Review {}/{} · ",
+                review.index + 1,
+                review.steps.len()
+            )),
+            Span::styled(
+                format!("{PIECE} {turn}"),
+                Style::new().fg(player_color(turn)).bold(),
+            ),
+            Span::raw(format!(
+                " threw {}, played: ",
+                app.dice.map_or(0, |d| d.value)
+            )),
+            grade,
+        ])
+        .centered();
+    }
     let who = Span::styled(
         format!("{PIECE} {turn}"),
         Style::new().fg(player_color(turn)).bold(),
@@ -416,7 +444,7 @@ fn status_line(app: &App) -> Line<'static> {
                     format!("{PIECE} {w} wins!"),
                     Style::new().fg(player_color(*w)).bold(),
                 ),
-                Span::raw("  Enter for a rematch, Esc for the menu"),
+                Span::raw("  Enter rematch · v review · Esc menu"),
             ])
             .centered();
         }
@@ -431,8 +459,11 @@ fn status_line(app: &App) -> Line<'static> {
 }
 
 fn footer_hint(app: &App) -> &'static str {
+    if app.review.is_some() {
+        return "←→ step · Tab next slip · ↑↓ options · e share · Esc done";
+    }
     match &app.phase {
-        Phase::GameOver(_) => "Enter/n rematch · e share · [ ] scroll · Esc menu · q quit",
+        Phase::GameOver(_) => "Enter rematch · v review · e share · [ ] scroll · Esc menu",
         Phase::Rolling { .. } | Phase::Moving { .. } => "Space skip · Esc menu · ? rules · q quit",
         _ if !app.current_is_human() => "Space hurry · Esc menu · ? rules · q quit",
         Phase::AwaitRoll => "Space roll · e share · [ ] scroll · M sound · Esc menu · ? rules",
@@ -877,12 +908,26 @@ fn short_move(mv: Move) -> String {
     format!("{from} → {to}")
 }
 
+/// Colour for a reviewed move's grade.
+fn grade_color(grade: Grade) -> Color {
+    match grade {
+        Grade::Best | Grade::Good => Color::LightGreen,
+        Grade::Inaccuracy => RISK_COLOR,
+        Grade::Mistake => Color::LightRed,
+    }
+}
+
 fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
     let describe = |mv: Move| match mode {
         Mode::Full => describe_move(mv),
         Mode::Compact => short_move(mv),
     };
-    let block = panel("Moves");
+    let played = app.review_played();
+    let block = panel(if played.is_some() {
+        "Moves · ▸ played"
+    } else {
+        "Moves"
+    });
     let items: Vec<ListItem> = match &app.phase {
         Phase::Choosing {
             options, selected, ..
@@ -890,7 +935,12 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
             .iter()
             .enumerate()
             .map(|(i, o)| {
-                let mut spans = vec![Span::raw(format!("{} ", i + 1)), Span::raw(describe(o.mv))];
+                let number = match played {
+                    Some(p) if p == i => "▸ ".to_string(),
+                    Some(_) => "  ".to_string(),
+                    None => format!("{} ", i + 1),
+                };
+                let mut spans = vec![Span::raw(number), Span::raw(describe(o.mv))];
                 if o.outcome.captured {
                     spans.push(Span::styled(" ⚔", Style::new().fg(Color::LightRed).bold()));
                 }
@@ -1227,6 +1277,37 @@ mod tests {
         app.screen = Screen::Menu;
         let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
         assert!(out.contains("Leaderboard") && out.contains("Quit"), "{out}");
+    }
+
+    #[test]
+    fn review_screen_fits_at_every_size() {
+        let mut app = App::new(5);
+        app.controllers = [Controller::Human, Controller::Computer(Difficulty::Easy)];
+        app.animations = false;
+        let mut now = Time::ZERO;
+        app.new_game(now);
+        while !matches!(app.phase, Phase::GameOver(_)) {
+            app.handle_key(KeyEvent::from(KeyCode::Enter), now);
+            now += AI_DELAY * 2;
+            app.update(now);
+        }
+        let over = render(&app, MIN_W, MIN_H);
+        assert!(over.contains("v review"), "{over}");
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')), now);
+        let steps = app.review.as_ref().unwrap().steps.len();
+        for i in 0..steps {
+            for (w, h) in [(MIN_W, MIN_H), (COMPACT_MIN_W, COMPACT_MIN_H), (160, 50)] {
+                let out = render(&app, w, h);
+                assert!(out.contains(&format!("Review {}/{steps}", i + 1)), "{out}");
+                if w == MIN_W {
+                    assert!(
+                        out.contains("▸ played") && out.contains("Esc done"),
+                        "{out}"
+                    );
+                }
+            }
+            app.handle_key(KeyEvent::from(KeyCode::Right), now);
+        }
     }
 
     #[test]

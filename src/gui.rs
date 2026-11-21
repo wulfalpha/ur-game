@@ -7,7 +7,9 @@
 //! Everything is laid out on a virtual 1280×720 landscape canvas and scaled
 //! to fit the window, so the game looks the same at any size.
 
-use crate::app::{App, MenuItem, MoveOption, Phase, Screen, Time, entry_player, risk_percent};
+use crate::app::{
+    App, Grade, MenuItem, MoveOption, Phase, Screen, Time, entry_player, risk_percent,
+};
 use macroquad::prelude::*;
 
 use ratatui::crossterm::event::{KeyCode as Key, KeyEvent, KeyModifiers};
@@ -483,6 +485,15 @@ fn move_targets(app: &App, mv: Move) -> [Vec2; 2] {
 }
 
 /// Plain-text version of a log line for the GUI font, which lacks arrows.
+/// Colour for a reviewed move's grade.
+fn grade_color(grade: Grade) -> Color {
+    match grade {
+        Grade::Best | Grade::Good => TARGET,
+        Grade::Inaccuracy => RISK,
+        Grade::Mistake => DANGER,
+    }
+}
+
 fn plain(text: &str) -> String {
     text.replace(" → ", " to ").replace('→', "to")
 }
@@ -677,6 +688,36 @@ impl Ui<'_> {
 
     fn status(&self, app: &App) {
         let turn = app.game.turn();
+        if let Some(review) = &app.review {
+            let step = review.step();
+            let (grade, color) = match step.grade {
+                Grade::Best => ("best move".to_string(), ACCENT),
+                g => (
+                    format!("{} (−{:.1})", g.label(), step.hint.loss[step.played]),
+                    grade_color(g),
+                ),
+            };
+            let roll = app.dice.map_or(0, |d| d.value);
+            let head = format!(
+                "Review {}/{} · {turn} threw {roll}: ",
+                review.index + 1,
+                review.steps.len()
+            );
+            let full = self.text_width(&head, 24.0, true) + self.text_width(&grade, 24.0, true);
+            let x = 460.0 - full / 2.0;
+            self.text(
+                &head,
+                x,
+                44.0,
+                24.0,
+                player_text_color(turn),
+                true,
+                Align::Left,
+            );
+            let x = x + self.text_width(&head, 24.0, true);
+            self.text(&grade, x, 44.0, 24.0, color, true, Align::Left);
+            return;
+        }
         let who = match app.controller(turn) {
             crate::app::Controller::Human => turn.to_string(),
             crate::app::Controller::Computer(d) => format!("{turn} ({d})"),
@@ -996,7 +1037,13 @@ impl Ui<'_> {
 
     fn moves(&self, app: &mut App, now: Time) {
         let (x, y) = (PANEL_X, MOVES_Y);
-        self.panel(x, y, PANEL_W, MOVES_H, "Moves");
+        let played = app.review_played();
+        let title = if played.is_some() {
+            "Moves · » played"
+        } else {
+            "Moves"
+        };
+        self.panel(x, y, PANEL_W, MOVES_H, title);
         let Phase::Choosing {
             options, selected, ..
         } = &app.phase
@@ -1022,8 +1069,13 @@ impl Ui<'_> {
             }
             let fg = if is_sel { BACKGROUND } else { TEXT };
             let base = ry + 20.0;
+            let number = match played {
+                Some(p) if p == i => "»".to_string(),
+                Some(_) => String::new(),
+                None => format!("{}", i + 1),
+            };
             self.text(
-                &format!("{}", i + 1),
+                &number,
                 rx + 10.0,
                 base,
                 16.0,
@@ -1071,21 +1123,19 @@ impl Ui<'_> {
         }
         if human {
             let hint_y = y + MOVES_H - 38.0;
-            if self.button("Hint (H)", x + 14.0, hint_y, 120.0, 28.0, false) {
-                press(app, Key::Char('h'), now);
-            }
+            // In a review the reasons are always on, so no Hint button.
+            let why_x = if played.is_some() {
+                x + 14.0
+            } else {
+                if self.button("Hint (H)", x + 14.0, hint_y, 120.0, 28.0, false) {
+                    press(app, Key::Char('h'), now);
+                }
+                x + 146.0
+            };
             if let Some((is_best, why)) = app.hint_reason() {
                 // Gold for the recommended move, which its row also tags "best".
                 let color = if is_best { ACCENT } else { TEXT };
-                self.text(
-                    why,
-                    x + 146.0,
-                    hint_y + 19.0,
-                    15.0,
-                    color,
-                    is_best,
-                    Align::Left,
-                );
+                self.text(why, why_x, hint_y + 19.0, 15.0, color, is_best, Align::Left);
             }
         }
         if let Some(i) = clicked {
@@ -1233,8 +1283,14 @@ impl Ui<'_> {
     }
 
     fn footer(&self, app: &App) {
+        if app.review.is_some() {
+            let text =
+                "Left/Right: step · Tab: next slip · Up/Down: options · E: share · Esc: done";
+            self.text(text, 460.0, 706.0, 16.0, DIM, false, Align::Center);
+            return;
+        }
         let text = match &app.phase {
-            Phase::GameOver(_) => "Enter: rematch · E: share the Chronicle · Esc: menu",
+            Phase::GameOver(_) => "Enter: rematch · V: review your moves · E: share · Esc: menu",
             Phase::Rolling { .. } | Phase::Moving { .. } => {
                 "Space: skip animation · Esc: menu · ?: rules"
             }
@@ -1299,10 +1355,15 @@ impl Ui<'_> {
             true,
             Align::Center,
         );
-        if self.button("Rematch", x + 60.0, y + 90.0, 180.0, 40.0, true) {
+        if self.button("Rematch", x + 30.0, y + 90.0, 140.0, 40.0, true) {
             press(app, Key::Enter, now);
         }
-        if self.button("Menu", x + w - 240.0, y + 90.0, 180.0, 40.0, false) {
+        if !app.decisions.is_empty()
+            && self.button("Review (V)", x + 190.0, y + 90.0, 140.0, 40.0, false)
+        {
+            press(app, Key::Char('v'), now);
+        }
+        if self.button("Menu", x + w - 170.0, y + 90.0, 140.0, 40.0, false) {
             press(app, Key::Esc, now);
         }
     }

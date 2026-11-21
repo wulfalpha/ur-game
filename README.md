@@ -130,6 +130,7 @@ animations off there.
 | h             | Hint: show which move the Hard AI would play |
 | Space / Enter | Skip an animation, or hurry the computer  |
 | n             | Start a new game once one has finished    |
+| v             | Review your moves once a game has finished |
 | e             | Share the Chronicle (file + clipboard)    |
 | PgUp/PgDn, [ ] | Scroll the Chronicle back and forward    |
 | End           | Jump back to the newest Chronicle entry   |
@@ -196,6 +197,30 @@ as a text file and copied to the clipboard. Files go in a `chronicles`
 folder beside the saved game, named by date and time (UTC). In the terminal
 the copy uses OSC 52, which reaches your own clipboard even over SSH in
 terminals that allow it; on a local Mac it uses `pbcopy` as well.
+
+### Reviewing a game
+
+When a game ends, press **v** (or click **Review** in the window) to step
+back through every choice you made. Forced moves, where only one move was
+possible, are left out. Each one is put back on the board with the dice you
+threw, and the Hard computer rates every option the way a hint does:
+**★** marks its pick, the others show how much they give up, and the move
+you played is marked **▸** (**»** in the window). Each choice gets a grade:
+
+| Grade      | Means                                           |
+|------------|-------------------------------------------------|
+| best       | The move Hard would have played                 |
+| good       | Within half a point of it                       |
+| inaccuracy | Gives up a little (under 3 points)              |
+| mistake    | Gives up 3 points or more: a missed win or capture, a piece left hanging |
+
+A point is roughly one square of progress. ← and → step through the
+game, Tab and Shift+Tab jump to the next or previous inaccuracy or
+mistake, ↑ and ↓ read the reasons for the other options, and Esc goes back
+to the finished game. The Chronicle follows along, and gets a one-line
+summary such as "Review of Light's 24 choices: 15 best, 5 good, 3
+inaccuracies, 1 mistake." Your choices are saved with the game, so a
+resumed game can still be reviewed at the end.
 
 ### Leaderboard
 
@@ -303,6 +328,7 @@ cargo run --release --example arena 400
 | `src/ui.rs`        | Drawing the terminal screens                              |
 | `src/main.rs`      | Picks the window or the terminal and starts the game      |
 | `examples/arena.rs`| Computer-vs-computer matches                              |
+| `.github/workflows/ci.yml` | Formatting, clippy and tests on every push    |
 | `assets/sounds/`   | Original WAV effects used by both interfaces              |
 | `tools/generate_sounds.py` | Rebuild the original sound effects                |
 | `assets/fonts/`    | Noto Sans, the font used in the window                    |
