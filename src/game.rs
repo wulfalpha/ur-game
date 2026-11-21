@@ -275,6 +275,11 @@ impl GameState {
         self.finished[player.index()]
     }
 
+    /// `player`'s pieces on the board: bit `p` set for path position `p`.
+    pub(crate) fn board_bits(&self, player: Player) -> u16 {
+        self.board[player.index()]
+    }
+
     /// Does `player` have a piece on path position `pos` (`1..=14`)?
     pub fn occupies(&self, player: Player, pos: u8) -> bool {
         (1..=PATH_LEN).contains(&pos) && self.board[player.index()] & bit(pos) != 0

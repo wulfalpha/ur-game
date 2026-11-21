@@ -264,6 +264,7 @@ fn controller_name(controller: Controller) -> &'static str {
         Controller::Computer(Difficulty::Easy) => "easy",
         Controller::Computer(Difficulty::Medium) => "medium",
         Controller::Computer(Difficulty::Hard) => "hard",
+        Controller::Computer(Difficulty::Expert) => "expert",
     }
 }
 

@@ -4,6 +4,7 @@
 mod app;
 mod chronicle;
 mod cli;
+mod expert;
 mod gui;
 mod preferences;
 mod save;
@@ -26,7 +27,7 @@ fn main() -> io::Result<()> {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x5EED);
     let start = Instant::now();
-    let app = cli.into_app_with_preferences(
+    let mut app = cli.into_app_with_preferences(
         seed,
         start.elapsed(),
         save::default_path(),
@@ -34,6 +35,7 @@ fn main() -> io::Result<()> {
         stats::default_path(),
         chronicle::default_dir(),
     );
+    app.use_expert_table(expert::default_path());
     if terminal {
         tui::run(app, start)
     } else {

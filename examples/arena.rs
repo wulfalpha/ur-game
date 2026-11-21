@@ -4,12 +4,17 @@
 //!
 //! Plays every pairing of difficulties, alternating who moves first, and
 //! reports win rates plus average thinking time per move.
+//!
+//! Expert plays from the solved table saved by the game, if
+//! `UR_EXPERT_TABLE` names it (on a Mac, `~/Library/Application
+//! Support/ur-game/expert-table.bin`); otherwise it plays like Hard.
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::time::{Duration, Instant};
 use ur_game::ai::{Difficulty, choose_move};
 use ur_game::game::{GameState, Player, roll_dice};
+use ur_game::solver;
 
 fn main() {
     let games: u32 = std::env::args()
@@ -17,7 +22,14 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
     let mut rng = StdRng::seed_from_u64(2026);
-    let mut think = [(Duration::ZERO, 0u32); 4];
+    let mut think = [(Duration::ZERO, 0u32); Difficulty::ALL.len()];
+    match std::env::var_os("UR_EXPERT_TABLE") {
+        Some(path) => match solver::Table::read_from(path.as_ref()) {
+            Ok(table) => solver::install(table),
+            Err(e) => eprintln!("couldn't load the Expert table: {e}"),
+        },
+        None => eprintln!("UR_EXPERT_TABLE not set: Expert plays like Hard"),
+    }
 
     println!("{games} games per pairing, sides alternate\n");
     for (i, &a) in Difficulty::ALL.iter().enumerate() {

@@ -9,6 +9,7 @@
 //! game state only changes once the animation has finished.
 
 use crate::chronicle;
+use crate::expert::Expert;
 use crate::preferences::{self, Preferences};
 use crate::save::{self, SavedGame};
 use crate::sound::Cue;
@@ -23,6 +24,7 @@ use ur_game::game::{
     FINISH, GameState, Move, Outcome, Player, ROLL_WAYS, SAFE_ROSETTE, START, is_shared,
     roll_from_tips,
 };
+use ur_game::solver;
 
 /// A point in time, measured from when the program started. The front end
 /// supplies it, which keeps this module free of any particular clock (a
@@ -45,14 +47,19 @@ pub const IMPACT_TIME: Duration = Duration::from_millis(350);
 const LOG_CAPACITY: usize = 2000;
 /// Chronicle entries moved per scroll step.
 pub const LOG_SCROLL_STEP: usize = 3;
-/// The hint key asks this level for advice.
-pub const HINT_LEVEL: Difficulty = Difficulty::Hard;
-/// In a review, a move giving up less than this (in evaluation points,
-/// about a square of progress each) is as good as the best. The hint
-/// reasons say "nearly as good" below it too.
-const GOOD_LOSS: f64 = 0.5;
+/// Hints and reviews ask this level for advice: exact win chances once
+/// its table is loaded, Hard's judgement until then.
+pub const HINT_LEVEL: Difficulty = Difficulty::Expert;
+/// In a review, a move giving up less than this is as good as the best,
+/// and the hint reasons say "nearly as good". In evaluation points (about
+/// a square of progress each) when judged like Hard, or percentage points
+/// of winning chance when judged exactly. (The two pick out about the same
+/// share of a beginner's moves.)
+const GOOD_LOSS: [f64; 2] = [0.5, 0.5];
 /// …and one giving up this much or more is a mistake.
-const MISTAKE_LOSS: f64 = 3.0;
+const MISTAKE_LOSS: [f64; 2] = [3.0, 2.0];
+/// How often to check whether the Expert is ready to play.
+const EXPERT_POLL: Time = Time::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Controller {
@@ -61,12 +68,13 @@ pub enum Controller {
 }
 
 impl Controller {
-    pub const CHOICES: [Controller; 5] = [
+    pub const CHOICES: [Controller; 6] = [
         Controller::Human,
         Controller::Computer(Difficulty::Random),
         Controller::Computer(Difficulty::Easy),
         Controller::Computer(Difficulty::Medium),
         Controller::Computer(Difficulty::Hard),
+        Controller::Computer(Difficulty::Expert),
     ];
 
     pub fn label(self) -> String {
@@ -157,9 +165,13 @@ pub struct PieceAnimation {
 pub struct Hint {
     /// Index of the move the AI recommends.
     pub best: usize,
-    /// How much worse than the best move each option is, in evaluation
-    /// points (roughly one point per square of progress). `0.0` for the best.
+    /// How much worse than the best move each option is. `0.0` for the
+    /// best. See [`exact`](Self::exact) for the units.
     pub loss: Vec<f64>,
+    /// Losses are percentage points of the chance of winning, from the
+    /// solved game. Otherwise they're Hard's evaluation points (roughly one
+    /// per square of progress).
+    pub exact: bool,
     /// A few words on each option: why the best move is good, or what each
     /// other move gives up compared with it.
     pub reasons: Vec<String>,
@@ -191,16 +203,30 @@ pub enum Grade {
     Mistake,
 }
 
+impl Hint {
+    /// Is option `i` within a whisker of the best?
+    fn good(&self, i: usize) -> bool {
+        self.loss[i] < GOOD_LOSS[usize::from(self.exact)]
+    }
+
+    /// Option `i`'s loss as shown beside it: "−2.3%" or "−2.3" points.
+    pub fn loss_label(&self, i: usize) -> String {
+        let unit = if self.exact { "%" } else { "" };
+        format!("−{:.1}{unit}", self.loss[i])
+    }
+}
+
 impl Grade {
     pub const ALL: [Grade; 4] = [Grade::Best, Grade::Good, Grade::Inaccuracy, Grade::Mistake];
 
     fn of(played: usize, hint: &Hint) -> Grade {
         let loss = hint.loss[played];
-        if played == hint.best {
+        // An exact tie is as good as the best.
+        if played == hint.best || loss <= 0.0 {
             Grade::Best
-        } else if loss < GOOD_LOSS {
+        } else if hint.good(played) {
             Grade::Good
-        } else if loss < MISTAKE_LOSS {
+        } else if loss < MISTAKE_LOSS[usize::from(hint.exact)] {
             Grade::Inaccuracy
         } else {
             Grade::Mistake
@@ -358,6 +384,8 @@ pub struct App {
     chronicle_dir: Option<PathBuf>,
     deadline: Option<Time>,
     rng: StdRng,
+    /// The Expert level's solved table, loading or being worked out.
+    pub expert: Expert,
 }
 
 impl App {
@@ -395,6 +423,7 @@ impl App {
             save_failed: false,
             deadline: None,
             rng: StdRng::seed_from_u64(seed),
+            expert: Expert::off(),
         }
     }
 
@@ -427,6 +456,29 @@ impl App {
     pub fn use_stats_file(&mut self, path: PathBuf) {
         self.leaderboard = stats::load(&path);
         self.stats_path = Some(path);
+    }
+
+    /// Get the Expert level ready when it's first chosen, keeping its
+    /// solved table at `path`.
+    pub fn use_expert_table(&mut self, path: Option<PathBuf>) {
+        self.expert = Expert::new(path);
+        self.expert.load_if_saved();
+    }
+
+    /// How a seat is shown in the menu: like [`Controller::label`], but an
+    /// Expert still getting ready says how far along it is.
+    pub fn controller_label(&self, controller: Controller) -> String {
+        match (controller, self.expert.short_note()) {
+            (Controller::Computer(Difficulty::Expert), Some(note)) => format!("Expert · {note}"),
+            _ => controller.label(),
+        }
+    }
+
+    /// Is the computer to move an Expert still getting ready?
+    pub fn waiting_for_expert(&self) -> bool {
+        self.screen == Screen::Game
+            && self.controller(self.game.turn()) == Controller::Computer(Difficulty::Expert)
+            && self.expert.busy()
     }
 
     /// Write shared chronicles into `dir`.
@@ -832,6 +884,12 @@ impl App {
 
     pub fn update(&mut self, now: Time) {
         self.now = now;
+        if self
+            .controllers
+            .contains(&Controller::Computer(Difficulty::Expert))
+        {
+            self.expert.prepare();
+        }
         if self.screen != Screen::Game || self.show_help {
             return;
         }
@@ -887,6 +945,10 @@ impl App {
     /// Take the next automatic step for the current phase.
     fn advance(&mut self, now: Time) {
         match self.phase {
+            // Check back until the Expert's table is ready.
+            Phase::AwaitRoll if self.waiting_for_expert() => {
+                self.deadline = Some(now + EXPERT_POLL);
+            }
             Phase::AwaitRoll if !self.current_is_human() => self.roll(now),
             Phase::Choosing { selected, .. } if !self.current_is_human() => {
                 self.play(selected, now)
@@ -1439,21 +1501,28 @@ fn analyse(game: &GameState, roll: u8, options: &[MoveOption]) -> Hint {
         .into_iter()
         .map(|(_, score)| score)
         .collect();
+    let exact = HINT_LEVEL == Difficulty::Expert && solver::installed().is_some();
+    let scale = if exact { 100.0 } else { 1.0 };
     let best = (0..scores.len()).fold(0, |b, i| if scores[i] > scores[b] { i } else { b });
-    let loss: Vec<f64> = scores.iter().map(|s| scores[best] - s).collect();
+    let loss: Vec<f64> = scores.iter().map(|s| scale * (scores[best] - s)).collect();
+    let good: Vec<bool> = loss
+        .iter()
+        .map(|&l| l < GOOD_LOSS[usize::from(exact)])
+        .collect();
     let traits: Vec<Traits> = options.iter().map(|o| Traits::of(game, roll, o)).collect();
     let reasons = (0..options.len())
         .map(|i| {
             if i == best {
                 traits[best].why_good()
             } else {
-                traits[i].why_worse(&traits[best], loss[i])
+                traits[i].why_worse(&traits[best], good[i])
             }
         })
         .collect();
     Hint {
         best,
         loss,
+        exact,
         reasons,
     }
 }
@@ -1542,8 +1611,8 @@ impl Traits {
     }
 
     /// What this move gives up compared with the recommended `best`.
-    fn why_worse(&self, best: &Traits, loss: f64) -> String {
-        if loss < GOOD_LOSS {
+    fn why_worse(&self, best: &Traits, good: bool) -> String {
+        if good {
             "nearly as good".into()
         } else if best.wins && !self.wins {
             "misses the win".into()
@@ -1614,6 +1683,53 @@ mod tests {
         let now = Time::ZERO;
         app.new_game(now);
         (app, now)
+    }
+
+    #[test]
+    fn exact_hints_grade_in_win_chances() {
+        let hint = |exact| Hint {
+            best: 0,
+            loss: vec![0.0, 0.0, 0.4, 1.9, 2.0, 3.5],
+            exact,
+            reasons: vec![String::new(); 6],
+        };
+        let exact = hint(true);
+        let grades: Vec<Grade> = (0..6).map(|i| Grade::of(i, &exact)).collect();
+        use Grade::*;
+        // A move tied with the best is just as good.
+        assert_eq!(grades, [Best, Best, Good, Inaccuracy, Mistake, Mistake]);
+        assert_eq!(exact.loss_label(3), "−1.9%");
+        // In Hard's points, 2.0 and 3.5 sit either side of a mistake.
+        let points = hint(false);
+        let grades: Vec<Grade> = (0..6).map(|i| Grade::of(i, &points)).collect();
+        assert_eq!(grades, [Best, Best, Good, Inaccuracy, Inaccuracy, Mistake]);
+        assert_eq!(points.loss_label(3), "−1.9");
+    }
+
+    #[test]
+    fn an_expert_still_getting_ready_waits_before_throwing() {
+        let expert = Controller::Computer(Difficulty::Expert);
+        let (mut app, now) = game_app(expert, Controller::Human);
+        app.expert = Expert::pretend(crate::expert::Status::Solving(0.42));
+        assert!(app.waiting_for_expert());
+        assert_eq!(app.controller_label(expert), "Expert · 42% ready");
+        let mut t = now;
+        for _ in 0..20 {
+            t += Time::from_secs(1);
+            app.update(t);
+        }
+        assert_eq!(app.phase, Phase::AwaitRoll);
+        assert_eq!(app.game.turn(), Player::Light);
+        assert!(app.deadline().is_some(), "keeps checking back");
+        // Once it's ready (here: no table, so it plays like Hard), it plays.
+        app.expert = Expert::off();
+        assert!(!app.waiting_for_expert());
+        assert_eq!(app.controller_label(expert), "Computer · Expert");
+        for _ in 0..20 {
+            t += Time::from_secs(1);
+            app.update(t);
+        }
+        assert!(app.throw_number() > 0);
     }
 
     #[test]
@@ -1735,6 +1851,8 @@ mod tests {
         app.handle_key(key(KeyCode::Up), now); // Dark
         app.handle_key(key(KeyCode::Right), now);
         assert_eq!(app.controllers[1], Controller::Computer(Difficulty::Hard));
+        app.handle_key(key(KeyCode::Right), now);
+        assert_eq!(app.controllers[1], Controller::Computer(Difficulty::Expert));
         app.handle_key(key(KeyCode::Right), now);
         assert_eq!(app.controllers[1], Controller::Human); // wraps
         app.handle_key(key(KeyCode::Down), now);
@@ -2052,11 +2170,11 @@ mod tests {
         // Grades follow the hint's losses.
         for s in &review.steps {
             let loss = s.hint.loss[s.played];
-            let expected = if s.played == s.hint.best {
+            let expected = if s.played == s.hint.best || loss == 0.0 {
                 Grade::Best
-            } else if loss < GOOD_LOSS {
+            } else if loss < GOOD_LOSS[0] {
                 Grade::Good
-            } else if loss < MISTAKE_LOSS {
+            } else if loss < MISTAKE_LOSS[0] {
                 Grade::Inaccuracy
             } else {
                 Grade::Mistake
@@ -2324,8 +2442,10 @@ mod tests {
         assert_eq!(
             ai::choose_move(&app.game, 3, HINT_LEVEL, &mut rng),
             Some(best),
-            "agrees with the Hard AI"
+            "agrees with the Hard AI (Expert has no table in tests)"
         );
+        assert!(!hint.exact);
+        assert_eq!(hint.loss_label(hint.best), "−0.0");
         assert_eq!(hint.loss[hint.best], 0.0);
         assert!(hint.loss.iter().all(|&l| l >= 0.0));
         assert!(app.log.last().unwrap().starts_with("Hint for Light"));

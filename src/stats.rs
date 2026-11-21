@@ -327,7 +327,7 @@ mod tests {
         for bad in [
             "",
             "ur-game stats 2\neasy 2 3 0 0 0 0 -\n", // more won than played
-            "ur-game stats 2\nexpert 2 1 1 1 9 1 W\n", // no such level
+            "ur-game stats 2\nmaster 2 1 1 1 9 1 W\n", // no such level
             "ur-game stats 2\neasy 2 1 1 2 9 1 W\n", // best streak over wins
             "ur-game stats 2\neasy 2 1 1 1 9 1 WX\n", // unknown result
             "ur-game stats 2\neasy 1 1 1 1 9 1 WW\n", // more results than games

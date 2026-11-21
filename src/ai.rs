@@ -11,6 +11,10 @@
 //! - [`Difficulty::Hard`]: expectiminimax, 5 plies. (Odd depths suit the
 //!   evaluation better: 5 plies beats 4 in about 55% of games, while 6 is
 //!   no better than 5 at twice the cost.)
+//! - [`Difficulty::Expert`]: perfect play, from the solved game in
+//!   [`crate::solver`]. It needs a [`Table`](crate::solver::Table)
+//!   [installed](crate::solver::install) first, and plays like Hard until
+//!   there is one.
 //!
 //! Expectiminimax is minimax with *chance nodes* for the dice: at the
 //! player's own decisions it maximises, at the opponent's it minimises, and
@@ -19,6 +23,7 @@
 //! a decision node simply checks whose turn it is.
 
 use crate::game::{FINISH, GameState, Move, PATH_LEN, Player, ROLL_PROBABILITIES, SAFE_ROSETTE};
+use crate::solver;
 use rand::Rng;
 use std::collections::HashMap;
 use std::fmt;
@@ -30,23 +35,26 @@ pub enum Difficulty {
     Easy,
     Medium,
     Hard,
+    Expert,
 }
 
 impl Difficulty {
-    pub const ALL: [Difficulty; 4] = [
+    pub const ALL: [Difficulty; 5] = [
         Difficulty::Random,
         Difficulty::Easy,
         Difficulty::Medium,
         Difficulty::Hard,
+        Difficulty::Expert,
     ];
 
-    /// Search depth in decision plies (`None` for random play).
+    /// Search depth in decision plies (`None` for random play). Expert
+    /// searches like Hard while it has no solved table to play from.
     pub fn depth(self) -> Option<u32> {
         match self {
             Difficulty::Random => None,
             Difficulty::Easy => Some(1),
             Difficulty::Medium => Some(2),
-            Difficulty::Hard => Some(5),
+            Difficulty::Hard | Difficulty::Expert => Some(5),
         }
     }
 
@@ -76,6 +84,7 @@ impl fmt::Display for Difficulty {
             Difficulty::Easy => "Easy",
             Difficulty::Medium => "Medium",
             Difficulty::Hard => "Hard",
+            Difficulty::Expert => "Expert",
         })
     }
 }
@@ -83,7 +92,7 @@ impl fmt::Display for Difficulty {
 /// Choose a move for the player to move in `state` with this `roll`.
 /// Returns `None` when there is no legal move (the player must pass).
 ///
-/// Medium and Hard are deterministic: ties go to the first move in
+/// Medium, Hard and Expert are deterministic: ties go to the first move in
 /// [`GameState::legal_moves`] order. `rng` is used by `Random` and `Easy`.
 pub fn choose_move<R: Rng + ?Sized>(
     state: &GameState,
@@ -91,6 +100,13 @@ pub fn choose_move<R: Rng + ?Sized>(
     difficulty: Difficulty,
     rng: &mut R,
 ) -> Option<Move> {
+    if difficulty == Difficulty::Expert
+        && let Some(table) = solver::installed()
+    {
+        let ranked = table.rank_moves(state, roll);
+        let scores: Vec<f64> = ranked.iter().map(|&(_, v)| v).collect();
+        return best_index(&scores).map(|i| ranked[i].0);
+    }
     let moves = state.legal_moves(roll);
     match (moves.len(), difficulty.depth()) {
         (0, _) => None,
@@ -130,7 +146,14 @@ fn sample_index<R: Rng + ?Sized>(scores: &[f64], temperature: f64, rng: &mut R) 
 /// Score each legal move (from the mover's point of view) the way
 /// `difficulty` would, in [`GameState::legal_moves`] order. Useful for a
 /// "hint" feature or showing the AI's reasoning. Empty for `Random`.
+/// Expert's scores, once it has its table, are chances of winning (`0..=1`);
+/// the others' are evaluation points.
 pub fn rank_moves(state: &GameState, roll: u8, difficulty: Difficulty) -> Vec<(Move, f64)> {
+    if difficulty == Difficulty::Expert
+        && let Some(table) = solver::installed()
+    {
+        return table.rank_moves(state, roll);
+    }
     let Some(depth) = difficulty.depth() else {
         return Vec::new();
     };

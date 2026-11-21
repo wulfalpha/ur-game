@@ -576,8 +576,8 @@ impl Ui<'_> {
                 app.menu_selected = item;
             }
             let value = match item {
-                MenuItem::Light => Some((Player::Light, app.controllers[0].label())),
-                MenuItem::Dark => Some((Player::Dark, app.controllers[1].label())),
+                MenuItem::Light => Some((Player::Light, app.controller_label(app.controllers[0]))),
+                MenuItem::Dark => Some((Player::Dark, app.controller_label(app.controllers[1]))),
                 _ => None,
             };
             match item {
@@ -715,7 +715,7 @@ impl Ui<'_> {
             let (grade, color) = match step.grade {
                 Grade::Best => ("best move".to_string(), ACCENT),
                 g => (
-                    format!("{} (−{:.1})", g.label(), step.hint.loss[step.played]),
+                    format!("{} ({})", g.label(), step.hint.loss_label(step.played)),
                     grade_color(g),
                 ),
             };
@@ -750,6 +750,9 @@ impl Ui<'_> {
             Phase::Rolling { .. } => format!("{who} throws the dice…"),
             Phase::Moving { .. } => format!("{who} moves"),
             Phase::NoMoves { roll } => format!("{who} threw {roll}: no move, the turn passes"),
+            _ if app.waiting_for_expert() => {
+                format!("{who} is {}…", app.expert.note().unwrap_or_default())
+            }
             _ if thinking => format!("{who} is thinking…"),
             Phase::AwaitRoll => format!("{who}: throw the dice"),
             Phase::Choosing { roll, .. } => format!("{who}: you threw {roll}, choose a move"),
@@ -1124,7 +1127,7 @@ impl Ui<'_> {
                 if hint.best == i {
                     tag("best", ACCENT);
                 } else {
-                    tag(&format!("−{:.1}", hint.loss[i]), DIM);
+                    tag(&hint.loss_label(i), DIM);
                 }
             }
             if opt.outcome.winner.is_some() {
@@ -1297,11 +1300,13 @@ impl Ui<'_> {
                 dot(dots_x + 6.0 + i as f32 * 17.0, ry - 7.0, outcome);
             }
         };
-        for (i, level) in ur_game::ai::Difficulty::ALL.into_iter().enumerate() {
-            let ry = header_y + 50.0 + i as f32 * 44.0;
+        const ROW_H: f32 = 38.0;
+        let levels = ur_game::ai::Difficulty::ALL;
+        for (i, level) in levels.into_iter().enumerate() {
+            let ry = header_y + 50.0 + i as f32 * ROW_H;
             row(&level.to_string(), app.leaderboard.record(level), ry, false);
         }
-        let total_y = header_y + 50.0 + 4.0 * 44.0 + 14.0;
+        let total_y = header_y + 50.0 + levels.len() as f32 * ROW_H + 14.0;
         self.line(
             vec2(x + 50.0, total_y - 32.0),
             vec2(x + w - 50.0, total_y - 32.0),

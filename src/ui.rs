@@ -194,7 +194,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                     } else {
                         Player::Dark
                     };
-                    let value = app.controller(p).label();
+                    let value = app.controller_label(app.controller(p));
                     Line::from(vec![
                         Span::styled(cursor, style),
                         Span::styled(PIECE, Style::new().fg(player_color(p))),
@@ -322,7 +322,6 @@ fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
     };
     let mut lines = vec![
         Line::from("You against the computer").fg(DIM).centered(),
-        Line::from(""),
         Line::from(format!(
             "{:<7}{:>7}{:>4}{:>5}{:>5}{:>7}{:>5}{:>5}  {}",
             "Level", "Played", "Won", "Lost", "Win%", "Streak", "Best", "Avg", "Last 10"
@@ -449,7 +448,7 @@ fn status_line(app: &App) -> Line<'static> {
         let grade = match step.grade {
             Grade::Best => Span::styled("best move", Style::new().fg(ACCENT).bold()),
             g => Span::styled(
-                format!("{} −{:.1}", g.label(), step.hint.loss[step.played]),
+                format!("{} {}", g.label(), step.hint.loss_label(step.played)),
                 Style::new().fg(grade_color(g)).bold(),
             ),
         };
@@ -488,6 +487,9 @@ fn status_line(app: &App) -> Line<'static> {
         }
         Phase::Rolling { .. } => " is throwing the dice…".to_string(),
         Phase::Moving { .. } => " is moving…".to_string(),
+        _ if app.waiting_for_expert() => {
+            format!(" (Expert) is {}…", app.expert.note().unwrap_or_default())
+        }
         _ if !app.current_is_human() => " (computer) is thinking…".to_string(),
         Phase::AwaitRoll => " to roll the dice".to_string(),
         Phase::Choosing { .. } => " to choose a move".to_string(),
@@ -998,7 +1000,7 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
                     spans.push(if i == hint.best {
                         Span::styled(" ★", Style::new().fg(ACCENT).bold())
                     } else {
-                        Span::styled(format!(" −{:.1}", hint.loss[i]), Style::new().fg(DIM))
+                        Span::styled(format!(" {}", hint.loss_label(i)), Style::new().fg(DIM))
                     });
                 }
                 let line = Line::from(spans);
@@ -1285,6 +1287,7 @@ mod tests {
         app.hint = Some(crate::app::Hint {
             best: 0,
             loss: vec![0.0],
+            exact: true,
             reasons: vec!["escapes 63% danger".into()],
         });
         for (w, h) in [(MIN_W, MIN_H), (COMPACT_MIN_W, COMPACT_MIN_H)] {

@@ -61,6 +61,9 @@ pub enum Seat {
     Easy,
     Medium,
     Hard,
+    /// Perfect play. The first time, it takes a few minutes to work the
+    /// game out, then it's saved for next time.
+    Expert,
 }
 
 impl From<Seat> for Controller {
@@ -71,6 +74,7 @@ impl From<Seat> for Controller {
             Seat::Easy => Controller::Computer(Difficulty::Easy),
             Seat::Medium => Controller::Computer(Difficulty::Medium),
             Seat::Hard => Controller::Computer(Difficulty::Hard),
+            Seat::Expert => Controller::Computer(Difficulty::Expert),
         }
     }
 }

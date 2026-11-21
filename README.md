@@ -117,9 +117,17 @@ In the window, click the dice to throw, then click a piece (or the square
 it would land on) to move it. Hovering shows where it would go. All the
 keys below work in the window too.
 
-In the menu, choose Human or Computer for each side. The computer has four
-levels: Random, Easy, Medium and Hard. You can also turn the dice and piece
-animations off there.
+In the menu, choose Human or Computer for each side. The computer has five
+levels: Random, Easy, Medium, Hard and Expert. You can also turn the dice
+and piece animations off there.
+
+Expert plays perfectly. The first time you choose it, it works out the whole
+game, which takes about three minutes on a recent laptop and uses about
+800 MB of memory while it runs. The menu shows how far along it is, and you
+can start a game straight away: the Expert waits for the table before its
+first throw. The result is saved (276 MB, beside the saved game), so after
+that it is ready in a moment. Once it's saved, it also makes hints and game
+reviews exact, whoever you're playing.
 
 | Key           | What it does                              |
 |---------------|-------------------------------------------|
@@ -127,7 +135,7 @@ animations off there.
 | r             | Throw the dice                            |
 | ← → ↑ ↓ / Tab / Shift+Tab | Choose between moves          |
 | 1–9           | Play that move from the list straight away|
-| h             | Hint: show which move the Hard AI would play |
+| h             | Hint: show the best move and what the others cost |
 | Space / Enter | Skip an animation, or hurry the computer  |
 | n             | Start a new game once one has finished    |
 | v             | Review your moves once a game has finished |
@@ -150,10 +158,12 @@ the window). It counts every opponent piece within reach and the odds of
 each throw, so it's exact. The middle rosette and your own row are always
 safe.
 
-When you ask for a hint, the cursor jumps to the Hard AI's choice, marked
-★. Every other move shows how much worse it is, such as −2.5. The scale is
-roughly one point per square of progress, so −2.5 is about two and a half
-squares worse. Hints are noted in the log.
+When you ask for a hint, the cursor jumps to the best move, marked ★.
+Every other move shows how much worse it is. Once Expert's table has been
+worked out (see above), hints are exact: −2.5% means that move lowers your
+chance of winning by two and a half percentage points. Until then, the
+Hard computer gives them, in points of roughly one square of progress each,
+so −2.5 is about two and a half squares worse. Hints are noted in the log.
 
 Each move also gets a short reason, shown for the highlighted move at the
 bottom of the move panel (next to the Hint button in the window). The
@@ -203,18 +213,19 @@ terminals that allow it; on a local Mac it uses `pbcopy` as well.
 When a game ends, press **v** (or click **Review** in the window) to step
 back through every choice you made. Forced moves, where only one move was
 possible, are left out. Each one is put back on the board with the dice you
-threw, and the Hard computer rates every option the way a hint does:
+threw, and every option is rated the way a hint does:
 **★** marks its pick, the others show how much they give up, and the move
 you played is marked **▸** (**»** in the window). Each choice gets a grade:
 
-| Grade      | Means                                           |
-|------------|-------------------------------------------------|
-| best       | The move Hard would have played                 |
-| good       | Within half a point of it                       |
-| inaccuracy | Gives up a little (under 3 points)              |
-| mistake    | Gives up 3 points or more: a missed win or capture, a piece left hanging |
+| Grade      | With Expert's table           | Without it (Hard's points) |
+|------------|-------------------------------|----------------------------|
+| best       | The best move, or one exactly as good | The move Hard would have played |
+| good       | Costs under 0.5% of your winning chance | Under half a point |
+| inaccuracy | Costs under 2%                | Under 3 points             |
+| mistake    | Costs 2% or more: a missed win or capture, a piece left hanging | 3 points or more |
 
-A point is roughly one square of progress. ← and → step through the
+The two scales are set so they grade about the same share of a beginner's
+moves as slips. ← and → step through the
 game, Tab and Shift+Tab jump to the next or previous inaccuracy or
 mistake, ↑ and ↓ read the reasons for the other options, and Esc goes back
 to the finished game. The Chronicle follows along, and gets a one-line
@@ -259,7 +270,9 @@ removes the save.
 
 Saves go in `~/.local/share/ur-game` on Linux (or under `$XDG_DATA_HOME`),
 `~/Library/Application Support/ur-game` on macOS, and
-`%LOCALAPPDATA%\ur-game` on Windows.
+`%LOCALAPPDATA%\ur-game` on Windows. Expert's table, `expert-table.bin`,
+goes in the same folder; delete it to free the space, and it is worked out
+again the next time you choose Expert.
 
 ### Preferences
 
@@ -296,7 +309,7 @@ cargo run --release -- --light human --dark hard --start
 | `--tui`              | Play in the terminal instead of a window             |
 | `--gui`              | Open a window even over SSH                          |
 
-`PLAYER` is one of `human`, `random`, `easy`, `medium` or `hard`. Set both
+`PLAYER` is one of `human`, `random`, `easy`, `medium`, `hard` or `expert`. Set both
 sides to computer players to watch them play each other. A continued game
 keeps the players it was started with.
 
@@ -312,7 +325,24 @@ keeps the players it was started with.
   comes up through different move orders), so it still answers in a few
   thousandths of a second.
 
-To score a position, the computer counts how far each side's pieces have
+- **Expert** never guesses. The game has 137,913,936 positions (counting
+  only where the pieces are and whose turn it is), few enough to work out
+  the exact chance of winning from every one of them. Expert plays the
+  move with the best chance. It beats Hard in about 61% of games, and
+  with perfect play on both sides, the player who moves first wins 51.5%
+  of the time.
+
+The solver (`src/solver.rs`) finds the chances by value iteration: it
+repeatedly sets each position's chance to the average, over the five
+throws, of the best move's result, until nothing changes by more than a
+millionth. Captures send pieces back, so positions can repeat and the
+answer can't be read off in a single pass. Pieces never leave the finished
+pile, though, so it works through the positions in groups by how many
+pieces are home, most first, and each group only depends on itself and the
+groups already done. Within a group it updates the positions nearest the
+end first, which settles a third faster.
+
+To score a position, Easy, Medium and Hard count how far each side's pieces have
 travelled, gives a bonus for holding the middle rosette, and subtracts the
 risk of each piece being captured.
 
@@ -332,6 +362,8 @@ cargo run --release --example arena 400
 |--------------------|-----------------------------------------------------------|
 | `src/game.rs`      | The rules: board, dice, legal moves, captures, rosettes   |
 | `src/ai.rs`        | The computer players                                      |
+| `src/solver.rs`    | Solving the game exactly, for Expert                      |
+| `src/expert.rs`    | Loading, or working out and saving, Expert's table        |
 | `src/app.rs`       | Game flow shared by both versions: menu, turns, input     |
 | `src/cli.rs`       | Command-line options                                      |
 | `src/preferences.rs` | Loading and saving sound, volume, and animation preferences |
@@ -353,7 +385,9 @@ The rules and computer players are a library with no screen code in them.
 The window and terminal versions share the same game flow, so they play
 exactly alike.
 
-Run the tests with `cargo test`.
+Run the tests with `cargo test`. Checking the full solve takes a few
+minutes, so it only runs when asked:
+`cargo test --release -- --ignored full_game`.
 
 ## License
 
