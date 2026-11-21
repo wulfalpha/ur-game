@@ -2,7 +2,7 @@
 
 use crate::app::{
     App, Controller, Dice, Grade, MenuItem, Phase, Screen, describe_move, entry_player,
-    risk_percent,
+    risk_percent, rules_text,
 };
 use crate::stats::{Outcome, Record};
 use ratatui::Frame;
@@ -15,8 +15,7 @@ use ratatui::widgets::{
 };
 use ur_game::ai::Difficulty;
 use ur_game::game::{
-    COLS, FINISH, Move, PIECES_PER_PLAYER, Player, ROWS, START, cell_of, is_board_cell,
-    is_rosette_cell, path_position,
+    COLS, Move, PIECES_PER_PLAYER, Player, ROWS, Rules, START, is_board_cell, is_rosette_cell,
 };
 
 const CELL_W: u16 = 6;
@@ -116,7 +115,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Screen::Leaderboard => draw_leaderboard(frame, app, area),
     }
     if app.show_help {
-        draw_help(frame, area, mode);
+        draw_help(frame, area, mode, app.active_rules());
     }
 }
 
@@ -139,7 +138,12 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                 .bold()
                 .centered(),
         )
-        .padding(Padding::uniform(1));
+        // On short screens, no blank rows inside the border.
+        .padding(if box_area.height >= 21 {
+            Padding::uniform(1)
+        } else {
+            Padding::horizontal(1)
+        });
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
 
@@ -202,6 +206,11 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                         Span::styled(format!("◀ {value:^18} ▶"), style),
                     ])
                 }
+                MenuItem::Rules => Line::from(vec![
+                    Span::styled(cursor, style),
+                    Span::styled(format!("  {:<8}", "Rules"), style),
+                    Span::styled(format!("◀ {:^18} ▶", app.rules.to_string()), style),
+                ]),
                 MenuItem::Animation => Line::from(vec![
                     Span::styled(cursor, style),
                     Span::styled(format!("  {:<8}", "Animate"), style),
@@ -287,7 +296,11 @@ fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::new().fg(BOARD_EDGE))
         .style(Style::new().bg(PANEL).fg(TEXT))
         .title(Line::from(" ✦ Leaderboard ✦ ").fg(ACCENT).bold().centered())
-        .title_bottom(Line::from(" Enter / Esc back ").fg(DIM).centered())
+        .title_bottom(
+            Line::from(" ←→ other rules · Enter / Esc back ")
+                .fg(DIM)
+                .centered(),
+        )
         .padding(Padding::horizontal(1));
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
@@ -321,7 +334,15 @@ fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(spans)
     };
     let mut lines = vec![
-        Line::from("You against the computer").fg(DIM).centered(),
+        Line::from(vec![
+            Span::styled("◀ ", Style::new().fg(DIM)),
+            Span::styled(
+                format!("{} rules", app.leaderboard_rules),
+                Style::new().fg(ACCENT).bold(),
+            ),
+            Span::styled(" ▶  you against the computer", Style::new().fg(DIM)),
+        ])
+        .centered(),
         Line::from(format!(
             "{:<7}{:>7}{:>4}{:>5}{:>5}{:>7}{:>5}{:>5}  {}",
             "Level", "Played", "Won", "Lost", "Win%", "Streak", "Best", "Avg", "Last 10"
@@ -332,11 +353,15 @@ fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
     for level in Difficulty::ALL {
         lines.push(row(
             &level.to_string(),
-            app.leaderboard.record(level),
+            app.leaderboard.record(app.leaderboard_rules, level),
             false,
         ));
     }
-    lines.push(row("Total", app.leaderboard.total(), true));
+    lines.push(row(
+        "Total",
+        app.leaderboard.total(app.leaderboard_rules),
+        true,
+    ));
     lines.push(Line::from(""));
     lines.push(
         Line::from(vec![
@@ -488,7 +513,8 @@ fn status_line(app: &App) -> Line<'static> {
         Phase::Rolling { .. } => " is throwing the dice…".to_string(),
         Phase::Moving { .. } => " is moving…".to_string(),
         _ if app.waiting_for_expert() => {
-            format!(" (Expert) is {}…", app.expert.note().unwrap_or_default())
+            let note = app.expert.note(app.game.rules()).unwrap_or_default();
+            format!(" (Expert) is {note}…")
         }
         _ if !app.current_is_human() => " (computer) is thinking…".to_string(),
         Phase::AwaitRoll => " to roll the dice".to_string(),
@@ -520,12 +546,14 @@ fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
     // While a piece animates, it has already left the waiting row, and a
     // borne-off piece counts as home once it hops off the board.
     let left_reserve = anim.is_some_and(|a| a.mv.is_entry());
-    let arrived_home = anim.is_some_and(|a| a.mv.is_bear_off() && a.pos == FINISH);
+    let game = &app.game;
+    let arrived_home =
+        anim.is_some_and(|a| game.is_bear_off(a.mv) && a.pos == game.rules().finish());
     let waiting = app.game.waiting(player) - u8::from(left_reserve);
     let finished = app.game.finished(player) + u8::from(arrived_home);
     let target = app.selected_or_moving().filter(|_| mine);
     let entry_hl = anim.is_none() && target.is_some_and(|o| o.mv.is_entry());
-    let home_hl = !arrived_home && target.is_some_and(|o| o.mv.is_bear_off());
+    let home_hl = !arrived_home && target.is_some_and(|o| game.is_bear_off(o.mv));
     let active = app.game.turn() == player && !matches!(app.phase, Phase::GameOver(_));
 
     let name_style = if active {
@@ -608,16 +636,19 @@ enum Content {
 
 fn cell_view(app: &App, row: usize, col: usize) -> CellView {
     let game = &app.game;
+    let rules = game.rules();
     let mover = game.turn();
     let here = Some((row, col));
     let anim = app.piece_animation();
-    let from_cell = app.selected_move().and_then(|o| cell_of(mover, o.mv.from));
+    let from_cell = app
+        .selected_move()
+        .and_then(|o| rules.cell_of(mover, o.mv.from));
     let to_cell = app
         .selected_or_moving()
         .filter(|_| !anim.is_some_and(|a| a.landed))
-        .and_then(|o| cell_of(mover, o.mv.to));
-    let hidden_cell = anim.and_then(|a| cell_of(mover, a.mv.from));
-    let moving_cell = anim.and_then(|a| cell_of(mover, a.pos));
+        .and_then(|o| rules.cell_of(mover, o.mv.to));
+    let hidden_cell = anim.and_then(|a| rules.cell_of(mover, a.mv.from));
+    let moving_cell = anim.and_then(|a| rules.cell_of(mover, a.pos));
     let impact = anim.is_some_and(|a| a.impact);
 
     // The animating piece has left its start square.
@@ -647,10 +678,16 @@ fn cell_view(app: &App, row: usize, col: usize) -> CellView {
     CellView { highlight, content }
 }
 
-/// Path number shown on a square. The numbers are the same on both private
-/// rows and the shared row is common, so one label per square is unambiguous.
-fn square_number(row: usize, col: usize) -> Option<u8> {
-    path_position(Player::Light, row, col).or(path_position(Player::Dark, row, col))
+/// Path number shown on a square: the player to move's, or for the other
+/// side's starting squares, theirs. Under Finkel's rules the numbers are
+/// the same for both sides; at Masters' far end, where the routes cross,
+/// they follow whoever is moving, to match the move list.
+fn square_number(app: &App, row: usize, col: usize) -> Option<u8> {
+    let rules = app.game.rules();
+    let mover = app.game.turn();
+    rules
+        .path_position(mover, row, col)
+        .or(rules.path_position(mover.opponent(), row, col))
 }
 
 fn content_line(content: Content) -> Line<'static> {
@@ -709,7 +746,8 @@ impl Widget for BoardView<'_> {
                     }
                     Highlight::None => (Style::new().fg(BOARD_EDGE), BorderType::Plain),
                 };
-                let number = square_number(row, col).map_or(String::new(), |n| n.to_string());
+                let number =
+                    square_number(self.app, row, col).map_or(String::new(), |n| n.to_string());
                 let tile = if is_rosette_cell(row, col) {
                     TILE_ROSETTE
                 } else if (row + col) % 2 == 0 {
@@ -764,7 +802,8 @@ impl Widget for TileBoard<'_> {
                     Highlight::None => TILE_B,
                 };
                 buf.set_style(rect, Style::new().bg(bg));
-                let number = square_number(row, col).map_or(String::new(), |n| n.to_string());
+                let number =
+                    square_number(self.app, row, col).map_or(String::new(), |n| n.to_string());
                 let [top, bottom] =
                     Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(rect);
                 Paragraph::new(Line::from(number).fg(TILE_NUMBER)).render(top, buf);
@@ -796,9 +835,10 @@ fn draw_dice(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let rules = app.game.rules();
     if let Some((tips, settled)) = app.tumbling_dice() {
         let color = player_color(app.game.turn());
-        let dice: Vec<Span> = (0..4)
+        let dice: Vec<Span> = (0..rules.dice())
             .flat_map(|i| {
                 let marked = tips & (1 << i) != 0;
                 let sym = match (marked, settled) {
@@ -822,7 +862,7 @@ fn draw_dice(frame: &mut Frame, app: &App, area: Rect) {
             lines.insert(0, Line::from(""));
         }
         let label = if settled {
-            format!("{}  {}", app.game.turn(), tips.count_ones())
+            format!("{}  {}", app.game.turn(), rules.roll_from_tips(tips.into()))
         } else {
             "throwing…".to_string()
         };
@@ -847,7 +887,7 @@ fn draw_dice(frame: &mut Frame, app: &App, area: Rect) {
         }) => {
             let stale = matches!(app.phase, Phase::AwaitRoll);
             let color = if stale { DIM } else { player_color(player) };
-            let dice: Vec<Span> = (0..4)
+            let dice: Vec<Span> = (0..rules.dice())
                 .flat_map(|i| {
                     let marked = tips & (1 << i) != 0;
                     let (sym, style) = if marked {
@@ -874,13 +914,7 @@ fn draw_dice(frame: &mut Frame, app: &App, area: Rect) {
                     },
                 ])
                 .centered(),
-                Line::from(match value {
-                    0 => "no move",
-                    4 => "the rarest throw!",
-                    _ => "",
-                })
-                .fg(DIM)
-                .centered(),
+                Line::from(dice_note(rules, tips, value)).fg(DIM).centered(),
             ])
         }
     };
@@ -892,10 +926,15 @@ fn draw_dice_compact(frame: &mut Frame, app: &App, area: Rect) {
     let block = panel("Dice");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let rules = app.game.rules();
     let (tips, color, value) = match (app.tumbling_dice(), app.dice) {
         (Some((tips, settled)), _) => {
             let color = player_color(app.game.turn());
-            (tips, color, settled.then(|| tips.count_ones() as u8))
+            (
+                tips,
+                color,
+                settled.then(|| rules.roll_from_tips(tips.into())),
+            )
         }
         (
             None,
@@ -917,7 +956,7 @@ fn draw_dice_compact(frame: &mut Frame, app: &App, area: Rect) {
             return;
         }
     };
-    let mut spans: Vec<Span> = (0..4)
+    let mut spans: Vec<Span> = (0..rules.dice())
         .map(|i| {
             if tips & (1 << i) != 0 {
                 Span::styled("▲ ", Style::new().fg(color).bold())
@@ -933,14 +972,24 @@ fn draw_dice_compact(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans).centered()), inner);
 }
 
+/// A word on an unusual throw.
+fn dice_note(rules: Rules, tips: u8, value: u8) -> &'static str {
+    match (rules, value) {
+        (_, 0) => "no move",
+        (Rules::Masters, 4) if tips == 0 => "no marks: moves 4",
+        (Rules::Finkel, 4) => "the rarest throw!",
+        _ => "",
+    }
+}
+
 /// Short move label for narrow panels: "new → 3", "5 → 9", "13 → off".
-fn short_move(mv: Move) -> String {
+fn short_move(rules: Rules, mv: Move) -> String {
     let from = if mv.from == START {
         "new".to_string()
     } else {
         mv.from.to_string()
     };
-    let to = if mv.to == FINISH {
+    let to = if mv.to == rules.finish() {
         "off".to_string()
     } else {
         mv.to.to_string()
@@ -958,9 +1007,10 @@ fn grade_color(grade: Grade) -> Color {
 }
 
 fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
+    let rules = app.game.rules();
     let describe = |mv: Move| match mode {
-        Mode::Full => describe_move(mv),
-        Mode::Compact => short_move(mv),
+        Mode::Full => describe_move(rules, mv),
+        Mode::Compact => short_move(rules, mv),
     };
     let played = app.review_played();
     let block = panel(if played.is_some() {
@@ -1110,7 +1160,8 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
 // Help overlay
 // ---------------------------------------------------------------------------
 
-fn draw_help(frame: &mut Frame, area: Rect, mode: Mode) {
+fn draw_help(frame: &mut Frame, area: Rect, mode: Mode, rules: Rules) {
+    let t = rules_text(rules);
     let popup = area.centered(
         Constraint::Length(74.min(area.width)),
         Constraint::Length(24.min(area.height)),
@@ -1121,49 +1172,46 @@ fn draw_help(frame: &mut Frame, area: Rect, mode: Mode) {
         Line::from("Race all 7 pieces along your path and off the board."),
         Line::from(vec![
             Span::styled("Path ", Style::new().fg(ACCENT).bold()),
-            Span::raw(
-                "your row 1–4 (left), middle row 5–12 (right), your row 13–14, then off with an exact throw.",
-            ),
+            Span::raw(t.path_short),
         ]),
         Line::from(vec![
             Span::styled("Dice ", Style::new().fg(ACCENT).bold()),
-            Span::raw("count the marked tips, 0–4. 2 is the most likely."),
+            Span::raw(t.dice_short),
         ]),
-        Line::from("You must move if you can. No move, or a 0: turn passes."),
+        Line::from(format!("You must move if you can. {}", t.pass)),
         Line::from(vec![
             Span::styled("⚔ ", Style::new().fg(Color::LightRed).bold()),
-            Span::raw("Land on an enemy in the middle row to send it back."),
+            Span::raw(t.capture_short),
         ]),
         Line::from(vec![
             Span::styled("✦ ", Style::new().fg(ROSETTE_COLOR).bold()),
-            Span::raw("Rosettes give another throw; the middle one is safe."),
+            Span::raw(t.rosettes_short),
         ]),
     ];
     let full = vec![
         h("Goal"),
         Line::from("Be the first to move all 7 of your pieces along your path and off the board."),
         Line::from(""),
-        h("Path (squares are numbered 1–14 on the board)"),
-        Line::from(
-            "Enter on your own row and run left (1–4), along the shared middle row to the right (5–12), back onto your own row (13–14), then off with an exact throw.",
-        ),
+        Line::from(format!("Path ({})", t.numbers))
+            .fg(ACCENT)
+            .bold(),
+        Line::from(t.path),
         Line::from(""),
         h("Dice"),
-        Line::from(
-            "Four 4-sided dice with two marked tips each. Your throw is the marks showing (0–4); 2 is most common, 0 and 4 just 1 time in 16.",
-        ),
+        Line::from(t.dice),
         Line::from(""),
         h("Moving"),
-        Line::from(
-            "Move one piece exactly the number thrown. You cannot land on your own piece, but you may jump over pieces. No legal move (or a 0): your turn passes.",
-        ),
+        Line::from(format!(
+            "Move one piece exactly the number thrown. You cannot land on your own piece, but you may jump over pieces. {}",
+            t.pass
+        )),
         Line::from(vec![
             Span::styled("⚔ Capture  ", Style::new().fg(Color::LightRed).bold()),
-            Span::raw("Land on an enemy in the middle row: it goes back to start."),
+            Span::raw(t.capture),
         ]),
         Line::from(vec![
             Span::styled("✦ Rosette  ", Style::new().fg(ROSETTE_COLOR).bold()),
-            Span::raw("Throw again. The middle rosette is also safe from capture."),
+            Span::raw(t.rosettes),
         ]),
         Line::from(vec![
             Span::styled("⚠ Risk  ", Style::new().fg(RISK_COLOR).bold()),
@@ -1178,7 +1226,11 @@ fn draw_help(frame: &mut Frame, area: Rect, mode: Mode) {
         .border_type(BorderType::Double)
         .border_style(Style::new().fg(BOARD_EDGE))
         .style(Style::new().bg(PANEL).fg(TEXT))
-        .title(Line::from(" How to play ").bold().centered())
+        .title(
+            Line::from(format!(" How to play: {rules} rules "))
+                .bold()
+                .centered(),
+        )
         .title_bottom(Line::from(" press any key to close ").fg(DIM).centered())
         .padding(Padding::horizontal(1));
     frame.render_widget(
@@ -1303,10 +1355,14 @@ mod tests {
     fn leaderboard_screen_fits_and_shows_records() {
         use crate::stats::Outcome::*;
         let mut app = App::new(0);
-        app.leaderboard.add(Difficulty::Easy, Won, Some(40));
-        app.leaderboard.add(Difficulty::Easy, Lost, Some(50));
-        app.leaderboard.add(Difficulty::Easy, Won, Some(61));
-        app.leaderboard.add(Difficulty::Hard, Abandoned, None);
+        app.leaderboard
+            .add(Rules::Finkel, Difficulty::Easy, Won, Some(40));
+        app.leaderboard
+            .add(Rules::Finkel, Difficulty::Easy, Lost, Some(50));
+        app.leaderboard
+            .add(Rules::Finkel, Difficulty::Easy, Won, Some(61));
+        app.leaderboard
+            .add(Rules::Finkel, Difficulty::Hard, Abandoned, None);
         app.screen = Screen::Leaderboard;
         for (w, h) in [(COMPACT_MIN_W, COMPACT_MIN_H), (MIN_W, MIN_H)] {
             let out = render(&app, w, h);
@@ -1413,6 +1469,44 @@ mod tests {
     }
 
     #[test]
+    fn masters_games_render_at_every_size() {
+        let ai = Controller::Computer(Difficulty::Easy);
+        let mut app = App::new(9);
+        app.controllers = [ai, ai];
+        app.rules = Rules::Masters;
+        let mut now = Time::ZERO;
+        app.new_game(now);
+        let mut saw_three_dice = false;
+        for _ in 0..20_000 {
+            for (w, h) in [(COMPACT_MIN_W, COMPACT_MIN_H), (MIN_W, MIN_H), (120, 40)] {
+                let out = render(&app, w, h);
+                // Three dice, never four.
+                let dice = out.matches(['▲', '△', '◁']).count();
+                assert!(dice == 0 || dice == 3, "{dice} dice:\n{out}");
+                saw_three_dice |= dice == 3;
+            }
+            if matches!(app.phase, Phase::GameOver(_)) {
+                break;
+            }
+            now += AI_DELAY / 4;
+            app.update(now);
+        }
+        assert!(saw_three_dice);
+        assert!(matches!(app.phase, Phase::GameOver(_)));
+        let out = render(&app, MIN_W, MIN_H);
+        assert!(out.contains("wins!"));
+        // Squares run to 16.
+        assert!(out.contains("16") && out.contains("15"), "{out}");
+        // The rules screen explains Masters.
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')), now);
+        let out = render(&app, MIN_W, MIN_H);
+        assert!(
+            out.contains("Masters rules") && out.contains("no marks"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn compact_menu_and_help_fit() {
         let mut app = App::new(0);
         let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
@@ -1434,14 +1528,22 @@ mod tests {
 
     #[test]
     fn short_move_labels() {
-        assert_eq!(short_move(Move { from: START, to: 3 }), "new → 3");
-        assert_eq!(short_move(Move { from: 5, to: 9 }), "5 → 9");
         assert_eq!(
-            short_move(Move {
-                from: 13,
-                to: FINISH
-            }),
+            short_move(Rules::Finkel, Move { from: START, to: 3 }),
+            "new → 3"
+        );
+        assert_eq!(short_move(Rules::Finkel, Move { from: 5, to: 9 }), "5 → 9");
+        assert_eq!(
+            short_move(Rules::Finkel, Move { from: 13, to: 15 }),
             "13 → off"
+        );
+        assert_eq!(
+            short_move(Rules::Masters, Move { from: 13, to: 15 }),
+            "13 → 15"
+        );
+        assert_eq!(
+            short_move(Rules::Masters, Move { from: 16, to: 17 }),
+            "16 → off"
         );
     }
 

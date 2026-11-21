@@ -4,6 +4,7 @@ use crate::app::{App, Controller, Time};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use ur_game::ai::Difficulty;
+use ur_game::game::Rules;
 
 /// The Royal Game of Ur, one of the oldest known board games.
 #[derive(Debug, Parser)]
@@ -25,6 +26,12 @@ pub struct Cli {
     /// Who plays Dark.
     #[arg(short, long, value_enum, value_name = "PLAYER", default_value_t = Seat::Medium)]
     pub dark: Seat,
+
+    /// The rules to play by: finkel (the usual ones) or masters (a longer
+    /// route, three dice, no safe squares). Defaults to the last chosen in
+    /// the menu.
+    #[arg(short, long, value_enum, value_name = "RULES")]
+    pub rules: Option<RulesArg>,
 
     /// Skip the menu and start a new game straight away.
     #[arg(short, long)]
@@ -51,6 +58,22 @@ pub struct Cli {
     /// replayed with the same throws.
     #[arg(long, value_name = "NUMBER")]
     pub seed: Option<u64>,
+}
+
+/// Which rules to play by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum RulesArg {
+    Finkel,
+    Masters,
+}
+
+impl From<RulesArg> for Rules {
+    fn from(rules: RulesArg) -> Self {
+        match rules {
+            RulesArg::Finkel => Rules::Finkel,
+            RulesArg::Masters => Rules::Masters,
+        }
+    }
 }
 
 /// Who sits at one side of the board.
@@ -117,6 +140,11 @@ impl Cli {
             app.use_chronicle_dir(dir);
         }
         app.controllers = [self.light.into(), self.dark.into()];
+        // Only for this run, like --mute: the menu's choice stays saved.
+        if let Some(rules) = self.rules {
+            app.rules = rules.into();
+            app.leaderboard_rules = app.rules;
+        }
         if self.no_animation {
             app.animations = false;
         }

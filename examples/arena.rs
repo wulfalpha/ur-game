@@ -1,19 +1,20 @@
 //! AI vs AI tournament for tuning the computer opponents.
 //!
-//!     cargo run --release --example arena [games]
+//!     cargo run --release --example arena [games] [finkel|masters]
 //!
 //! Plays every pairing of difficulties, alternating who moves first, and
 //! reports win rates plus average thinking time per move.
 //!
 //! Expert plays from the solved table saved by the game, if
 //! `UR_EXPERT_TABLE` names it (on a Mac, `~/Library/Application
-//! Support/ur-game/expert-table.bin`); otherwise it plays like Hard.
+//! Support/ur-game/expert-finkel.bin` or `expert-masters.bin`); otherwise it
+//! plays like Hard.
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::time::{Duration, Instant};
 use ur_game::ai::{Difficulty, choose_move};
-use ur_game::game::{GameState, Player, roll_dice};
+use ur_game::game::{GameState, Player, Rules};
 use ur_game::solver;
 
 fn main() {
@@ -21,17 +22,21 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
+    let rules = match std::env::args().nth(2).as_deref() {
+        Some("masters") => Rules::Masters,
+        _ => Rules::Finkel,
+    };
     let mut rng = StdRng::seed_from_u64(2026);
     let mut think = [(Duration::ZERO, 0u32); Difficulty::ALL.len()];
     match std::env::var_os("UR_EXPERT_TABLE") {
-        Some(path) => match solver::Table::read_from(path.as_ref()) {
+        Some(path) => match solver::Table::read_from(path.as_ref(), rules) {
             Ok(table) => solver::install(table),
             Err(e) => eprintln!("couldn't load the Expert table: {e}"),
         },
         None => eprintln!("UR_EXPERT_TABLE not set: Expert plays like Hard"),
     }
 
-    println!("{games} games per pairing, sides alternate\n");
+    println!("{rules} rules, {games} games per pairing, sides alternate\n");
     for (i, &a) in Difficulty::ALL.iter().enumerate() {
         for &b in &Difficulty::ALL[..i] {
             let mut a_wins = 0;
@@ -41,9 +46,9 @@ fn main() {
                 } else {
                     Player::Dark
                 };
-                let mut g = GameState::new();
+                let mut g = GameState::with_rules(rules);
                 while g.winner().is_none() {
-                    let roll = roll_dice(&mut rng);
+                    let roll = rules.roll_dice(&mut rng);
                     let d = if g.turn() == a_side { a } else { b };
                     let t = Instant::now();
                     let choice = choose_move(&g, roll, d, &mut rng);

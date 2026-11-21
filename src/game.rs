@@ -1,74 +1,190 @@
-//! Rules engine for the Royal Game of Ur, following Irving Finkel's
-//! reconstruction from the Babylonian tablet of Itti-Marduk-balāṭu (177 BC).
+//! Rules engine for the Royal Game of Ur, in two rule sets:
+//!
+//! - [`Rules::Finkel`]: Irving Finkel's reconstruction from the Babylonian
+//!   tablet of Itti-Marduk-balāṭu (177 BC), the rules most sets come with.
+//! - [`Rules::Masters`]: James Masters' rules, as played on RoyalUr.net: a
+//!   longer route that crosses the far end of the board, three dice, and no
+//!   safe squares.
 //!
 //! This module is pure game logic: no I/O, no terminal, no randomness beyond
-//! an injected RNG. Both the TUI and a future GUI drive it through
+//! an injected RNG. Both front ends drive it through
 //! [`GameState::legal_moves`] and [`GameState::apply`].
 //!
 //! # Path positions
 //!
 //! Each player's piece position is a number along *their own* route:
 //!
-//! | position | meaning                                         |
-//! |----------|-------------------------------------------------|
-//! | `0`      | waiting to enter (not yet on the board)         |
-//! | `1..=4`  | private starting lane                           |
-//! | `5..=12` | shared middle lane (captures happen here)       |
-//! | `13..=14`| private finishing lane                          |
-//! | `15`     | borne off — finished                            |
+//! | position | Finkel                  | Masters                         |
+//! |----------|-------------------------|---------------------------------|
+//! | `0`      | waiting to enter        | waiting to enter                |
+//! | `1..=4`  | own starting lane       | own starting lane               |
+//! | `5..`    | `5..=12` the middle row (captures happen here) | `5..=16` the middle row, then round the far end (captures happen anywhere here) |
+//! | then     | `13..=14` own finishing lane | –                          |
+//! | finish   | `15`: borne off         | `17`: borne off                 |
 //!
-//! Both players walk the shared lane in the same direction, so path position
-//! `p` in `5..=12` is the *same physical square* for both players.
+//! Both players walk the middle row in the same direction, so a shared
+//! position is usually the *same physical square* for both. The exception
+//! is the far end in Masters, where the routes cross in opposite directions:
+//! see [`Rules::opposite`].
 
 use rand::Rng;
 use std::fmt;
+use std::ops::RangeInclusive;
 
 /// Pieces each player starts with.
 pub const PIECES_PER_PLAYER: u8 = 7;
-/// Number of squares on a player's route.
-pub const PATH_LEN: u8 = 14;
 /// Pseudo-position for a piece that has not entered the board.
 pub const START: u8 = 0;
-/// Pseudo-position for a piece that has been borne off.
-pub const FINISH: u8 = PATH_LEN + 1;
-/// Path positions that are rosettes (landing grants another turn).
-pub const ROSETTES: [u8; 3] = [4, 8, 14];
-/// The central rosette: a piece here cannot be captured.
-pub const SAFE_ROSETTE: u8 = 8;
-/// First and last path positions of the shared lane.
-pub const SHARED_FIRST: u8 = 5;
-pub const SHARED_LAST: u8 = 12;
 
 /// Grid dimensions of the physical board (3 rows × 8 columns, with gaps).
 pub const ROWS: usize = 3;
 pub const COLS: usize = 8;
 
-/// Probability of each roll `0..=4` with four binary tetrahedral dice
-/// (binomial with n = 4, p = ½).
-pub const ROLL_PROBABILITIES: [f64; 5] =
-    [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
-
-/// The same odds as whole numbers: how many of the 16 equally likely ways
-/// the four dice can land give each roll.
-pub const ROLL_WAYS: [u8; 5] = [1, 4, 6, 4, 1];
-
-pub fn is_rosette(pos: u8) -> bool {
-    ROSETTES.contains(&pos)
+/// Which rules a game is played by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Rules {
+    #[default]
+    Finkel,
+    Masters,
 }
 
-pub fn is_shared(pos: u8) -> bool {
-    (SHARED_FIRST..=SHARED_LAST).contains(&pos)
+impl Rules {
+    pub const ALL: [Rules; 2] = [Rules::Finkel, Rules::Masters];
+
+    /// Number of squares on a player's route.
+    pub fn path_len(self) -> u8 {
+        match self {
+            Rules::Finkel => 14,
+            Rules::Masters => 16,
+        }
+    }
+
+    /// Pseudo-position for a piece that has been borne off.
+    pub fn finish(self) -> u8 {
+        self.path_len() + 1
+    }
+
+    /// Path positions that are rosettes (landing grants another turn).
+    pub fn rosettes(self) -> &'static [u8] {
+        match self {
+            Rules::Finkel => &[4, 8, 14],
+            Rules::Masters => &[4, 8, 12, 16],
+        }
+    }
+
+    pub fn is_rosette(self, pos: u8) -> bool {
+        self.rosettes().contains(&pos)
+    }
+
+    /// The square where a piece can't be captured: the central rosette in
+    /// Finkel's rules. Masters has none.
+    pub fn safe_square(self) -> Option<u8> {
+        match self {
+            Rules::Finkel => Some(8),
+            Rules::Masters => None,
+        }
+    }
+
+    pub fn is_safe(self, pos: u8) -> bool {
+        self.safe_square() == Some(pos)
+    }
+
+    /// Path positions both players use, where captures happen.
+    pub fn shared(self) -> RangeInclusive<u8> {
+        match self {
+            Rules::Finkel => 5..=12,
+            Rules::Masters => 5..=16,
+        }
+    }
+
+    pub fn is_shared(self, pos: u8) -> bool {
+        self.shared().contains(&pos)
+    }
+
+    /// The opponent's path position for the same physical square as shared
+    /// position `pos`. The same number, except at the far end in Masters,
+    /// where the routes run in opposite directions (12 ↔ 16, 13 ↔ 15).
+    pub fn opposite(self, pos: u8) -> u8 {
+        match self {
+            Rules::Masters if pos >= 12 => 28 - pos,
+            _ => pos,
+        }
+    }
+
+    /// How many dice are thrown.
+    pub fn dice(self) -> u8 {
+        match self {
+            Rules::Finkel => 4,
+            Rules::Masters => 3,
+        }
+    }
+
+    /// How many of 16 equally likely chances give each throw `0..=4`.
+    /// Finkel: four binary dice. Masters: three, with no marks counting as
+    /// 4 (so each eighth is two sixteenths here).
+    pub fn roll_ways(self) -> [u8; 5] {
+        match self {
+            Rules::Finkel => [1, 4, 6, 4, 1],
+            Rules::Masters => [0, 6, 6, 2, 2],
+        }
+    }
+
+    /// The chance of each throw `0..=4`.
+    pub fn roll_probabilities(self) -> [f64; 5] {
+        self.roll_ways().map(|w| f64::from(w) / 16.0)
+    }
+
+    /// Turn random bits into a throw: bit `i` set means die `i` came up
+    /// marked. Exposed so a UI can show the individual dice.
+    pub fn roll_from_tips(self, bits: u32) -> u8 {
+        let marked = (bits & ((1 << self.dice()) - 1)).count_ones() as u8;
+        match self {
+            Rules::Masters if marked == 0 => 4,
+            _ => marked,
+        }
+    }
+
+    /// Throw the dice.
+    pub fn roll_dice<R: Rng + ?Sized>(self, rng: &mut R) -> u8 {
+        self.roll_from_tips(rng.next_u32())
+    }
+
+    /// Grid cell `(row, col)` of a player's path position.
+    pub fn cell_of(self, player: Player, pos: u8) -> Option<(usize, usize)> {
+        let (own, other) = match player {
+            Player::Light => (0, 2),
+            Player::Dark => (2, 0),
+        };
+        let p = pos as usize;
+        match (self, pos) {
+            (_, 1..=4) => Some((own, 4 - p)),
+            (Rules::Finkel, 5..=12) => Some((1, p - 5)),
+            (Rules::Finkel, 13) => Some((own, 7)),
+            (Rules::Finkel, 14) => Some((own, 6)),
+            (Rules::Masters, 5..=11) => Some((1, p - 5)),
+            (Rules::Masters, 12) => Some((other, 6)),
+            (Rules::Masters, 13) => Some((other, 7)),
+            (Rules::Masters, 14) => Some((1, 7)),
+            (Rules::Masters, 15) => Some((own, 7)),
+            (Rules::Masters, 16) => Some((own, 6)),
+            _ => None,
+        }
+    }
+
+    /// Inverse of [`cell_of`](Self::cell_of): which path position (if any)
+    /// the cell is for `player`. Lets a GUI map a click back to a piece.
+    pub fn path_position(self, player: Player, row: usize, col: usize) -> Option<u8> {
+        (1..=self.path_len()).find(|&p| self.cell_of(player, p) == Some((row, col)))
+    }
 }
 
-/// Roll the four tetrahedral dice: each shows a marked tip with probability ½.
-pub fn roll_dice<R: Rng + ?Sized>(rng: &mut R) -> u8 {
-    roll_from_tips(rng.next_u32())
-}
-
-/// Turn four random bits into a roll. Exposed so a UI can show which of the
-/// individual dice came up marked (bit `i` set = die `i` marked).
-pub fn roll_from_tips(bits: u32) -> u8 {
-    (bits & 0b1111).count_ones() as u8
+impl fmt::Display for Rules {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Rules::Finkel => "Finkel",
+            Rules::Masters => "Masters",
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -104,8 +220,8 @@ impl fmt::Display for Player {
 }
 
 /// A move for the player whose turn it is: one piece from path position
-/// `from` to `to`. `from == START` enters a new piece; `to == FINISH` bears
-/// a piece off.
+/// `from` to `to`. `from == START` enters a new piece; `to` equal to the
+/// rules' [`finish`](Rules::finish) bears a piece off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Move {
     pub from: u8,
@@ -115,10 +231,6 @@ pub struct Move {
 impl Move {
     pub fn is_entry(self) -> bool {
         self.from == START
-    }
-
-    pub fn is_bear_off(self) -> bool {
-        self.to == FINISH
     }
 }
 
@@ -157,11 +269,11 @@ impl std::error::Error for MoveError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PositionError {
-    /// A position was greater than [`FINISH`].
+    /// A position was past the finish.
     OutOfRange,
     /// Two pieces of the same player share a board square.
     Stacked,
-    /// Pieces of both players share a square in the middle lane.
+    /// Pieces of both players share a square.
     Collision,
 }
 
@@ -200,14 +312,14 @@ impl std::ops::Deref for MoveList {
 /// Complete game state. Small and `Copy` so the AI can clone it freely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GameState {
-    /// Per player: bit `p` set ⇔ that player has a piece on path position `p`
-    /// (`1..=14`).
-    board: [u16; 2],
+    /// Per player: bit `p` set ⇔ that player has a piece on path position `p`.
+    board: [u32; 2],
     /// Per player: pieces not yet entered.
     waiting: [u8; 2],
     /// Per player: pieces borne off.
     finished: [u8; 2],
     turn: Player,
+    rules: Rules,
 }
 
 impl Default for GameState {
@@ -217,19 +329,36 @@ impl Default for GameState {
 }
 
 impl GameState {
-    /// A fresh game; Light moves first.
+    /// A fresh game under Finkel's rules; Light moves first.
     pub fn new() -> Self {
+        Self::with_rules(Rules::Finkel)
+    }
+
+    /// A fresh game under `rules`; Light moves first.
+    pub fn with_rules(rules: Rules) -> Self {
         GameState {
             board: [0; 2],
             waiting: [PIECES_PER_PLAYER; 2],
             finished: [0; 2],
             turn: Player::Light,
+            rules,
         }
     }
 
-    /// Build an arbitrary position from each player's seven piece positions
-    /// (`START`, `1..=14`, or `FINISH`). Handy for tests, puzzles and saves.
+    /// Build an arbitrary Finkel position from each player's seven piece
+    /// positions (`START`, on the path, or finished). Handy for tests.
     pub fn from_positions(
+        turn: Player,
+        light: [u8; PIECES_PER_PLAYER as usize],
+        dark: [u8; PIECES_PER_PLAYER as usize],
+    ) -> Result<Self, PositionError> {
+        Self::from_positions_in(Rules::Finkel, turn, light, dark)
+    }
+
+    /// [`from_positions`](Self::from_positions) under any rules. For
+    /// puzzles, saves and tests.
+    pub fn from_positions_in(
+        rules: Rules,
         turn: Player,
         light: [u8; PIECES_PER_PLAYER as usize],
         dark: [u8; PIECES_PER_PLAYER as usize],
@@ -239,14 +368,16 @@ impl GameState {
             waiting: [0; 2],
             finished: [0; 2],
             turn,
+            rules,
         };
+        let finish = rules.finish();
         for (player, positions) in [(Player::Light, light), (Player::Dark, dark)] {
             let i = player.index();
             for pos in positions {
                 match pos {
                     START => state.waiting[i] += 1,
-                    FINISH => state.finished[i] += 1,
-                    p if p > FINISH => return Err(PositionError::OutOfRange),
+                    p if p == finish => state.finished[i] += 1,
+                    p if p > finish => return Err(PositionError::OutOfRange),
                     p => {
                         if state.board[i] & bit(p) != 0 {
                             return Err(PositionError::Stacked);
@@ -256,11 +387,17 @@ impl GameState {
                 }
             }
         }
-        let shared_mask = (SHARED_FIRST..=SHARED_LAST).fold(0, |m, p| m | bit(p));
-        if state.board[0] & state.board[1] & shared_mask != 0 {
+        if state
+            .pieces_on_board(Player::Light)
+            .any(|p| state.enemy_on(Player::Light, p))
+        {
             return Err(PositionError::Collision);
         }
         Ok(state)
+    }
+
+    pub fn rules(&self) -> Rules {
+        self.rules
     }
 
     pub fn turn(&self) -> Player {
@@ -275,53 +412,69 @@ impl GameState {
         self.finished[player.index()]
     }
 
+    /// Does `mv` bear a piece off?
+    pub fn is_bear_off(&self, mv: Move) -> bool {
+        mv.to == self.rules.finish()
+    }
+
     /// `player`'s pieces on the board: bit `p` set for path position `p`.
-    pub(crate) fn board_bits(&self, player: Player) -> u16 {
+    pub(crate) fn board_bits(&self, player: Player) -> u32 {
         self.board[player.index()]
     }
 
-    /// Does `player` have a piece on path position `pos` (`1..=14`)?
+    /// Does `player` have a piece on their path position `pos`?
     pub fn occupies(&self, player: Player, pos: u8) -> bool {
-        (1..=PATH_LEN).contains(&pos) && self.board[player.index()] & bit(pos) != 0
+        (1..=self.rules.path_len()).contains(&pos) && self.board[player.index()] & bit(pos) != 0
     }
 
-    /// How many of the 16 equally likely throws would let `victim`'s
-    /// opponent capture the piece on `pos` with their next throw. Zero if
-    /// `victim` has no piece there, off the shared row, and on the safe
-    /// rosette.
+    /// Does `player`'s opponent have a piece on the square that is
+    /// `player`'s path position `pos`?
+    pub fn enemy_on(&self, player: Player, pos: u8) -> bool {
+        self.rules.is_shared(pos) && self.occupies(player.opponent(), self.rules.opposite(pos))
+    }
+
+    /// How many of 16 equal chances would let `victim`'s opponent capture
+    /// the piece on `pos` with their next throw. Zero if `victim` has no
+    /// piece there, off the shared squares, and on a safe square.
     pub fn capture_ways(&self, victim: Player, pos: u8) -> u8 {
-        if !is_shared(pos) || pos == SAFE_ROSETTE || !self.occupies(victim, pos) {
+        let rules = self.rules;
+        if !rules.is_shared(pos) || rules.is_safe(pos) || !self.occupies(victim, pos) {
             return 0;
         }
         let hunter = victim.opponent();
+        let target = rules.opposite(pos);
+        let ways = rules.roll_ways();
         (1..=4u8)
-            .filter(|&d| pos > d && self.occupies(hunter, pos - d))
-            .map(|d| ROLL_WAYS[d as usize])
+            .filter(|&d| target > d && self.occupies(hunter, target - d))
+            .map(|d| ways[d as usize])
             .sum()
     }
 
-    /// Path positions (`1..=14`) of `player`'s pieces on the board, ascending.
+    /// Path positions of `player`'s pieces on the board, ascending.
     pub fn pieces_on_board(&self, player: Player) -> impl Iterator<Item = u8> + '_ {
         let mask = self.board[player.index()];
-        (1..=PATH_LEN).filter(move |&p| mask & bit(p) != 0)
+        (1..=self.rules.path_len()).filter(move |&p| mask & bit(p) != 0)
     }
 
     /// Who occupies the physical cell at grid `(row, col)`, if anyone.
     pub fn piece_at_cell(&self, row: usize, col: usize) -> Option<Player> {
         Player::ALL.into_iter().find(|&player| {
-            path_position(player, row, col).is_some_and(|pos| self.occupies(player, pos))
+            self.rules
+                .path_position(player, row, col)
+                .is_some_and(|pos| self.occupies(player, pos))
         })
     }
 
-    /// The whole state packed into 43 bits, for use as a hash key.
+    /// The whole state packed into 48 bits, for use as a hash key.
     pub(crate) fn packed(&self) -> u64 {
         u64::from(self.board[0])
-            | u64::from(self.board[1]) << 16
-            | u64::from(self.waiting[0]) << 32
-            | u64::from(self.waiting[1]) << 35
-            | u64::from(self.finished[0]) << 38
-            | u64::from(self.finished[1]) << 41
-            | (self.turn.index() as u64) << 44
+            | u64::from(self.board[1]) << 17
+            | u64::from(self.waiting[0]) << 34
+            | u64::from(self.waiting[1]) << 37
+            | u64::from(self.finished[0]) << 40
+            | u64::from(self.finished[1]) << 43
+            | (self.turn.index() as u64) << 46
+            | (self.rules as u64) << 47
     }
 
     pub fn winner(&self) -> Option<Player> {
@@ -344,14 +497,14 @@ impl GameState {
             return moves;
         }
         let me = self.turn.index();
-        let opp = self.turn.opponent().index();
+        let finish = self.rules.finish();
         let mut consider = |from: u8| {
             let to = from + roll;
             let legal = match to {
-                t if t > FINISH => false, // bearing off needs an exact roll
-                FINISH => true,
+                t if t > finish => false, // bearing off needs an exact roll
+                t if t == finish => true,
                 t if self.board[me] & bit(t) != 0 => false, // own piece there
-                SAFE_ROSETTE => self.board[opp] & bit(SAFE_ROSETTE) == 0,
+                t if self.rules.is_safe(t) => !self.enemy_on(self.turn, t),
                 _ => true,
             };
             if legal {
@@ -361,7 +514,7 @@ impl GameState {
         if self.waiting[me] > 0 {
             consider(START);
         }
-        for from in 1..=PATH_LEN {
+        for from in 1..=self.rules.path_len() {
             if self.board[me] & bit(from) != 0 {
                 consider(from);
             }
@@ -411,16 +564,16 @@ impl GameState {
             self.board[me] &= !bit(mv.from);
         }
 
-        if mv.is_bear_off() {
+        if self.is_bear_off(mv) {
             self.finished[me] += 1;
         } else {
             self.board[me] |= bit(mv.to);
-            if is_shared(mv.to) && self.board[opp] & bit(mv.to) != 0 {
-                self.board[opp] &= !bit(mv.to);
+            if self.enemy_on(mover, mv.to) {
+                self.board[opp] &= !bit(self.rules.opposite(mv.to));
                 self.waiting[opp] += 1;
                 outcome.captured = true;
             }
-            outcome.extra_turn = is_rosette(mv.to);
+            outcome.extra_turn = self.rules.is_rosette(mv.to);
         }
 
         if self.finished[me] == PIECES_PER_PLAYER {
@@ -433,7 +586,7 @@ impl GameState {
     }
 }
 
-fn bit(pos: u8) -> u16 {
+fn bit(pos: u8) -> u32 {
     1 << pos
 }
 
@@ -441,46 +594,25 @@ fn bit(pos: u8) -> u16 {
 // Physical board geometry — shared by every front end.
 //
 //   col:  0   1   2   3   4   5   6   7
-//  row 0 [*] [ ] [ ] [ ]         [*] [ ]   Light's private lane
-//  row 1 [ ] [ ] [ ] [*] [ ] [ ] [ ] [ ]   shared lane
-//  row 2 [*] [ ] [ ] [ ]         [*] [ ]   Dark's private lane
+//  row 0 [*] [ ] [ ] [ ]         [*] [ ]   Light's side
+//  row 1 [ ] [ ] [ ] [*] [ ] [ ] [ ] [ ]   middle row
+//  row 2 [*] [ ] [ ] [ ]         [*] [ ]   Dark's side
 //
-// Route: own row cols 3→0 (1..=4), middle cols 0→7 (5..=12),
-// own row cols 7→6 (13..=14), then off the board.
+// Finkel: own row cols 3→0 (1..=4), middle cols 0→7 (5..=12), own row
+// cols 7→6 (13..=14), then off the board.
+// Masters: own row cols 3→0 (1..=4), middle cols 0→6 (5..=11), the
+// opponent's row cols 6→7 (12..=13), middle col 7 (14), own row cols 7→6
+// (15..=16), then off the board.
 // ---------------------------------------------------------------------------
-
-/// Grid cell `(row, col)` of a player's path position `1..=14`.
-pub fn cell_of(player: Player, pos: u8) -> Option<(usize, usize)> {
-    let own_row = match player {
-        Player::Light => 0,
-        Player::Dark => 2,
-    };
-    let p = pos as usize;
-    match pos {
-        1..=4 => Some((own_row, 4 - p)),
-        5..=12 => Some((1, p - 5)),
-        13 => Some((own_row, 7)),
-        14 => Some((own_row, 6)),
-        _ => None,
-    }
-}
-
-/// Inverse of [`cell_of`]: which path position (if any) the cell is for
-/// `player`. Lets a GUI map a click back to a piece.
-pub fn path_position(player: Player, row: usize, col: usize) -> Option<u8> {
-    (1..=PATH_LEN).find(|&p| cell_of(player, p) == Some((row, col)))
-}
 
 /// Is `(row, col)` an actual square (the board has two gaps)?
 pub fn is_board_cell(row: usize, col: usize) -> bool {
     row < ROWS && col < COLS && (row == 1 || !(4..=5).contains(&col))
 }
 
-/// Is `(row, col)` a rosette square?
+/// Is `(row, col)` a rosette square? The same five under both rule sets.
 pub fn is_rosette_cell(row: usize, col: usize) -> bool {
-    Player::ALL
-        .into_iter()
-        .any(|p| path_position(p, row, col).is_some_and(is_rosette))
+    matches!((row, col), (0 | 2, 0 | 6) | (1, 3))
 }
 
 #[cfg(test)]
@@ -490,7 +622,7 @@ mod tests {
     use rand::rngs::StdRng;
 
     const S: u8 = START;
-    const F: u8 = FINISH;
+    const F: u8 = 15;
 
     fn pos(turn: Player, light: [u8; 7], dark: [u8; 7]) -> GameState {
         GameState::from_positions(turn, light, dark).expect("valid test position")
@@ -536,17 +668,22 @@ mod tests {
 
     #[test]
     fn roll_distribution() {
-        let total: f64 = ROLL_PROBABILITIES.iter().sum();
-        assert!((total - 1.0).abs() < 1e-12);
-        // Exhaustive over all 16 tip combinations matches the table.
-        let mut counts = [0u32; 5];
-        for bits in 0..16 {
-            counts[roll_from_tips(bits) as usize] += 1;
+        for rules in Rules::ALL {
+            let odds = rules.roll_probabilities();
+            assert!((odds.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+            // Exhaustive over every combination of the dice matches the odds.
+            let combos = 1u32 << rules.dice();
+            let mut counts = [0u32; 5];
+            for bits in 0..combos {
+                counts[rules.roll_from_tips(bits) as usize] += 16 / combos;
+            }
+            assert_eq!(counts.map(|c| c as u8), rules.roll_ways(), "{rules}");
+            let mut rng = StdRng::seed_from_u64(7);
+            assert!((0..1000).all(|_| rules.roll_dice(&mut rng) <= 4));
         }
-        assert_eq!(counts, [1, 4, 6, 4, 1]);
-        assert_eq!(counts.map(|c| c as u8), ROLL_WAYS);
-        let mut rng = StdRng::seed_from_u64(7);
-        assert!((0..1000).all(|_| roll_dice(&mut rng) <= 4));
+        // Masters never throws 0: no marks moves 4.
+        assert_eq!(Rules::Masters.roll_from_tips(0), 4);
+        assert_eq!(Rules::Masters.roll_from_tips(0b1000), 4, "only three dice");
     }
 
     #[test]
@@ -716,21 +853,97 @@ mod tests {
         // 5 rosettes: four corners-ish plus the centre.
         let rosettes: Vec<_> = cells.filter(|&(r, c)| is_rosette_cell(r, c)).collect();
         assert_eq!(rosettes, vec![(0, 0), (0, 6), (1, 3), (2, 0), (2, 6)]);
-        for p in Player::ALL {
-            for pos in 1..=PATH_LEN {
-                let (r, c) = cell_of(p, pos).unwrap();
-                assert!(is_board_cell(r, c));
-                assert_eq!(path_position(p, r, c), Some(pos));
+        for rules in Rules::ALL {
+            for p in Player::ALL {
+                for pos in 1..=rules.path_len() {
+                    let (r, c) = rules.cell_of(p, pos).unwrap();
+                    assert!(is_board_cell(r, c));
+                    assert_eq!(rules.path_position(p, r, c), Some(pos));
+                    assert_eq!(
+                        rules.is_rosette(pos),
+                        is_rosette_cell(r, c),
+                        "{rules} {pos}"
+                    );
+                }
+                assert_eq!(rules.cell_of(p, START), None);
+                assert_eq!(rules.cell_of(p, rules.finish()), None);
             }
-            assert_eq!(cell_of(p, START), None);
-            assert_eq!(cell_of(p, FINISH), None);
+            // Shared squares are the same physical square for both players.
+            for pos in rules.shared() {
+                let other = rules.opposite(pos);
+                assert_eq!(rules.opposite(other), pos);
+                assert_eq!(
+                    rules.cell_of(Player::Light, pos),
+                    rules.cell_of(Player::Dark, other)
+                );
+            }
         }
-        // Shared lane is the same physical square for both players.
-        for pos in SHARED_FIRST..=SHARED_LAST {
-            assert_eq!(cell_of(Player::Light, pos), cell_of(Player::Dark, pos));
-        }
-        assert_eq!(cell_of(Player::Light, 1), Some((0, 3)));
-        assert_eq!(cell_of(Player::Dark, 14), Some((2, 6)));
+        assert_eq!(Rules::Finkel.cell_of(Player::Light, 1), Some((0, 3)));
+        assert_eq!(Rules::Finkel.cell_of(Player::Dark, 14), Some((2, 6)));
+        // Masters' route goes round the far end through Dark's corner.
+        assert_eq!(Rules::Masters.cell_of(Player::Light, 12), Some((2, 6)));
+        assert_eq!(Rules::Masters.cell_of(Player::Light, 14), Some((1, 7)));
+        assert_eq!(Rules::Masters.cell_of(Player::Light, 16), Some((0, 6)));
+    }
+
+    fn masters(turn: Player, light: [u8; 7], dark: [u8; 7]) -> GameState {
+        GameState::from_positions_in(Rules::Masters, turn, light, dark).expect("valid position")
+    }
+
+    #[test]
+    fn masters_rosettes_are_not_safe_but_still_give_a_throw() {
+        // Light captures Dark on the central rosette, and throws again.
+        let mut g = masters(Player::Light, [6, S, S, S, S, S, S], [8, S, S, S, S, S, S]);
+        let out = g.apply(2, mv(6, 8)).unwrap();
+        assert!(out.captured && out.extra_turn);
+        assert_eq!(g.waiting(Player::Dark), 7);
+        assert_eq!(g.turn(), Player::Light);
+    }
+
+    #[test]
+    fn masters_routes_cross_at_the_far_end() {
+        // Light's 12 is Dark's 16 (Dark's corner rosette), Light's 13 is
+        // Dark's 15, and both use 14.
+        let mut g = masters(
+            Player::Light,
+            [10, S, S, S, S, S, S],
+            [16, S, S, S, S, S, S],
+        );
+        assert_eq!(
+            g.capture_ways(Player::Dark, 16),
+            6,
+            "Light hits it with a 2"
+        );
+        let out = g.apply(2, mv(10, 12)).unwrap();
+        assert!(out.captured);
+        assert!(!g.occupies(Player::Dark, 16));
+        // Pieces can't share a square there.
+        assert_eq!(
+            GameState::from_positions_in(
+                Rules::Masters,
+                Player::Light,
+                [13, S, S, S, S, S, S],
+                [15, S, S, S, S, S, S]
+            ),
+            Err(PositionError::Collision)
+        );
+        // Dark on its 13 is in Light's way at Light's 15.
+        let g = masters(
+            Player::Light,
+            [14, S, S, S, S, S, S],
+            [13, S, S, S, S, S, S],
+        );
+        assert!(g.enemy_on(Player::Light, 15));
+        assert!(!g.enemy_on(Player::Light, 13), "Light's 13 is Dark's 15");
+    }
+
+    #[test]
+    fn masters_bears_off_from_16_with_an_exact_throw() {
+        let g = masters(Player::Light, [16, 17, 17, 17, 17, 17, 17], [S; 7]);
+        assert_eq!(g.legal_moves(1), vec![mv(16, 17)]);
+        assert!(g.legal_moves(2).is_empty());
+        assert!(g.is_bear_off(mv(16, 17)));
+        assert!(!GameState::new().is_bear_off(mv(16, 17)));
     }
 
     #[test]
@@ -746,15 +959,21 @@ mod tests {
     /// and both sides can win.
     #[test]
     fn random_playouts_hold_invariants() {
+        for rules in Rules::ALL {
+            playouts(rules);
+        }
+    }
+
+    fn playouts(rules: Rules) {
         let mut rng = StdRng::seed_from_u64(0xC0FFEE);
         let mut wins = [0u32; 2];
         for _ in 0..2000 {
-            let mut g = GameState::new();
+            let mut g = GameState::with_rules(rules);
             let mut turns = 0;
             while g.winner().is_none() {
                 turns += 1;
                 assert!(turns < 10_000, "game did not terminate");
-                let roll = roll_dice(&mut rng);
+                let roll = rules.roll_dice(&mut rng);
                 let moves = g.legal_moves(roll);
                 if moves.is_empty() {
                     g.pass(roll).unwrap();
@@ -765,6 +984,9 @@ mod tests {
                 for p in Player::ALL {
                     let total = g.waiting(p) + g.finished(p) + g.pieces_on_board(p).count() as u8;
                     assert_eq!(total, PIECES_PER_PLAYER);
+                    for pos in g.pieces_on_board(p) {
+                        assert!(!g.enemy_on(p, pos), "two pieces on one square");
+                    }
                 }
             }
             wins[g.winner().unwrap().index()] += 1;

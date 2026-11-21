@@ -19,10 +19,10 @@
 //! Expectiminimax is minimax with *chance nodes* for the dice: at the
 //! player's own decisions it maximises, at the opponent's it minimises, and
 //! between decisions it averages over the five possible rolls, weighted by
-//! [`ROLL_PROBABILITIES`]. Rosette extra turns need no special handling:
+//! [`Rules::roll_probabilities`](crate::game::Rules::roll_probabilities). Rosette extra turns need no special handling:
 //! a decision node simply checks whose turn it is.
 
-use crate::game::{FINISH, GameState, Move, PATH_LEN, Player, ROLL_PROBABILITIES, SAFE_ROSETTE};
+use crate::game::{GameState, Move, Player};
 use crate::solver;
 use rand::Rng;
 use std::collections::HashMap;
@@ -101,7 +101,7 @@ pub fn choose_move<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Option<Move> {
     if difficulty == Difficulty::Expert
-        && let Some(table) = solver::installed()
+        && let Some(table) = solver::installed(state.rules())
     {
         let ranked = table.rank_moves(state, roll);
         let scores: Vec<f64> = ranked.iter().map(|&(_, v)| v).collect();
@@ -150,7 +150,7 @@ fn sample_index<R: Rng + ?Sized>(scores: &[f64], temperature: f64, rng: &mut R) 
 /// the others' are evaluation points.
 pub fn rank_moves(state: &GameState, roll: u8, difficulty: Difficulty) -> Vec<(Move, f64)> {
     if difficulty == Difficulty::Expert
-        && let Some(table) = solver::installed()
+        && let Some(table) = solver::installed(state.rules())
     {
         return table.rank_moves(state, roll);
     }
@@ -202,8 +202,10 @@ impl Search {
         let v = if depth == 0 || state.winner().is_some() {
             evaluate(state, self.me)
         } else {
-            (0..ROLL_PROBABILITIES.len())
-                .map(|roll| ROLL_PROBABILITIES[roll] * self.decision(state, roll as u8, depth))
+            let odds = state.rules().roll_probabilities();
+            (0..odds.len())
+                .filter(|&roll| odds[roll] > 0.0)
+                .map(|roll| odds[roll] * self.decision(state, roll as u8, depth))
                 .sum()
         };
         self.cache.insert(key, v);
@@ -258,9 +260,10 @@ impl Hasher for KeyHasher {
 
 const WIN: f64 = 10_000.0;
 /// A borne-off piece is worth a bit more than one on the last square: it can
-/// never be lost and no longer needs an exact roll.
-const FINISHED_VALUE: f64 = PATH_LEN as f64 + 4.0;
-/// Bonus for holding the central rosette: safe, and it blocks the opponent.
+/// never be lost and no longer needs an exact roll. This much more.
+const FINISHED_EXTRA: f64 = 4.0;
+/// Bonus for holding a safe square (Finkel's central rosette): it can't be
+/// captured there, and it blocks the opponent.
 const SAFE_ROSETTE_BONUS: f64 = 3.0;
 /// Value of being the player to move (roughly one average roll of progress).
 const TEMPO: f64 = 2.0;
@@ -291,10 +294,12 @@ pub fn evaluate(state: &GameState, me: Player) -> f64 {
 
 /// Progress made by `player`'s pieces.
 fn material(state: &GameState, player: Player) -> f64 {
-    let mut v = state.finished(player) as f64 * FINISHED_VALUE;
+    let rules = state.rules();
+    let finished_value = f64::from(rules.path_len()) + FINISHED_EXTRA;
+    let mut v = state.finished(player) as f64 * finished_value;
     for pos in state.pieces_on_board(player) {
         v += pos as f64;
-        if pos == SAFE_ROSETTE {
+        if rules.is_safe(pos) {
             v += SAFE_ROSETTE_BONUS;
         }
     }
@@ -311,17 +316,14 @@ fn exposure(state: &GameState, victim: Player) -> f64 {
         .sum()
 }
 
-// Compile-time sanity: the evaluation assumes a 14-square path.
-const _: () = assert!(FINISH == 15);
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{START as S, roll_dice};
+    use crate::game::{Rules, START as S};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
-    const F: u8 = FINISH;
+    const F: u8 = 15;
 
     fn pos(turn: Player, light: [u8; 7], dark: [u8; 7]) -> GameState {
         GameState::from_positions(turn, light, dark).unwrap()
@@ -356,7 +358,7 @@ mod tests {
             if g.winner().is_some() {
                 g = GameState::new();
             }
-            let roll = roll_dice(&mut rng);
+            let roll = Rules::Finkel.roll_dice(&mut rng);
             let legal = g.legal_moves(roll);
             for d in Difficulty::ALL {
                 let choice = choose_move(&g, roll, d, &mut rng);
@@ -472,7 +474,7 @@ mod tests {
                         vals.fold(f64::INFINITY, f64::min)
                     }
                 };
-                ROLL_PROBABILITIES[roll as usize] * v
+                state.rules().roll_probabilities()[roll as usize] * v
             })
             .sum()
     }
@@ -486,7 +488,7 @@ mod tests {
             if g.winner().is_some() {
                 g = GameState::new();
             }
-            let roll = roll_dice(&mut rng);
+            let roll = Rules::Finkel.roll_dice(&mut rng);
             let moves = g.legal_moves(roll);
             if moves.len() > 1 {
                 let scores = score_moves(&g, &moves, 3);
@@ -517,7 +519,7 @@ mod tests {
             };
             let mut g = GameState::new();
             while g.winner().is_none() {
-                let roll = roll_dice(&mut rng);
+                let roll = Rules::Finkel.roll_dice(&mut rng);
                 let d = if g.turn() == a_side { a } else { b };
                 match choose_move(&g, roll, d, &mut rng) {
                     Some(m) => drop(g.apply(roll, m).unwrap()),

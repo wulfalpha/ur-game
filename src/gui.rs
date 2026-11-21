@@ -16,8 +16,7 @@ use macroquad::prelude::*;
 use ratatui::crossterm::event::{KeyCode as Key, KeyEvent, KeyModifiers};
 use std::f32::consts::PI;
 use ur_game::game::{
-    COLS, FINISH, Move, PIECES_PER_PLAYER, Player, ROWS, START, cell_of, is_board_cell,
-    is_rosette_cell, path_position,
+    COLS, Move, PIECES_PER_PLAYER, Player, ROWS, Rules, START, is_board_cell, is_rosette_cell,
 };
 
 // ---------------------------------------------------------------------------
@@ -464,13 +463,13 @@ fn cell_center(row: usize, col: usize) -> Vec2 {
 
 /// Where a path position is drawn. Start and finish sit in the gap in the
 /// player's own row, where pieces come onto and go off the board.
-fn path_point(player: Player, pos: u8) -> Vec2 {
+fn path_point(rules: Rules, player: Player, pos: u8) -> Vec2 {
     let row = if player == Player::Light { 0 } else { 2 };
     match pos {
         START => cell_center(row, 4),
-        FINISH => cell_center(row, 5),
+        p if p == rules.finish() => cell_center(row, 5),
         _ => {
-            let (r, c) = cell_of(player, pos).expect("on the board");
+            let (r, c) = rules.cell_of(player, pos).expect("on the board");
             cell_center(r, c)
         }
     }
@@ -496,12 +495,12 @@ fn move_targets(app: &App, mv: Move) -> [Vec2; 2] {
     let from = if mv.is_entry() {
         reserve_point(player, app.game.waiting(player) as usize - 1)
     } else {
-        path_point(player, mv.from)
+        path_point(app.game.rules(), player, mv.from)
     };
-    let to = if mv.is_bear_off() {
+    let to = if app.game.is_bear_off(mv) {
         home_point(player, app.game.finished(player) as usize)
     } else {
-        path_point(player, mv.to)
+        path_point(app.game.rules(), player, mv.to)
     };
     [from, to]
 }
@@ -520,10 +519,10 @@ fn plain(text: &str) -> String {
     text.replace(" → ", " to ").replace('→', "to")
 }
 
-fn short_move(mv: Move) -> String {
+fn short_move(rules: Rules, mv: Move) -> String {
     match (mv.from, mv.to) {
         (START, to) => format!("Enter on {to}"),
-        (from, FINISH) => format!("{from} off the board"),
+        (from, to) if to == rules.finish() => format!("{from} off the board"),
         (from, to) => format!("{from} to {to}"),
     }
 }
@@ -566,8 +565,10 @@ impl Ui<'_> {
         );
 
         let items = app.menu_items();
-        let row_h = 46.0;
-        let top = 300.0 + (MenuItem::ALL.len() - items.len()) as f32 * row_h / 2.0;
+        // Eight rows fit between the board picture and the hint line.
+        let row_h = 42.0;
+        let top = 296.0 + (MenuItem::ALL.len() - items.len()) as f32 * row_h / 2.0;
+        let mid = (row_h - 8.0) / 2.0;
         for (i, &item) in items.iter().enumerate() {
             let (rx, ry, rw) = (x + 60.0, top + i as f32 * row_h, w - 120.0);
             let selected = app.menu_selected == item;
@@ -581,7 +582,7 @@ impl Ui<'_> {
                 _ => None,
             };
             match item {
-                MenuItem::Light | MenuItem::Dark | MenuItem::Animation => {
+                MenuItem::Light | MenuItem::Dark | MenuItem::Rules | MenuItem::Animation => {
                     let bg = if selected {
                         rgb(38, 61, 84)
                     } else {
@@ -591,25 +592,27 @@ impl Ui<'_> {
                     if selected {
                         self.rect_lines(rx, ry, rw, row_h - 8.0, 2.0, ACCENT);
                     }
-                    let base = ry + 29.0;
+                    let base = ry + mid + 7.0;
                     let label = match value {
                         Some((p, _)) => {
-                            self.draw_piece(vec2(rx + 26.0, ry + 22.0), 12.0, p, 1.0);
+                            self.draw_piece(vec2(rx + 26.0, ry + mid), 12.0, p, 1.0);
                             p.to_string()
                         }
+                        None if item == MenuItem::Rules => "Rules".to_string(),
                         None => "Animation".to_string(),
                     };
                     self.text(&label, rx + 48.0, base, 20.0, TEXT, true, Align::Left);
                     let shown = match value {
                         Some((_, v)) => v.replace(" · ", ": "),
+                        None if item == MenuItem::Rules => app.rules.to_string(),
                         None => (if app.animations { "On" } else { "Off" }).to_string(),
                     };
                     let vx = rx + rw - 150.0;
                     let color = if selected { ACCENT } else { TEXT };
                     self.text(&shown, vx, base, 20.0, color, false, Align::Center);
                     // Arrows: left half of the value area steps back.
-                    self.arrow(vec2(vx - 110.0, ry + 22.0), -1.0, color);
-                    self.arrow(vec2(vx + 110.0, ry + 22.0), 1.0, color);
+                    self.arrow(vec2(vx - 110.0, ry + mid), -1.0, color);
+                    self.arrow(vec2(vx + 110.0, ry + mid), 1.0, color);
                     if hover && self.clicked {
                         let code = if self.mouse.x < vx {
                             Key::Left
@@ -646,7 +649,7 @@ impl Ui<'_> {
         self.text(
             "Up/Down select · Left/Right change · Enter start · ? rules",
             CANVAS_W / 2.0,
-            640.0,
+            644.0,
             16.0,
             DIM,
             false,
@@ -751,7 +754,8 @@ impl Ui<'_> {
             Phase::Moving { .. } => format!("{who} moves"),
             Phase::NoMoves { roll } => format!("{who} threw {roll}: no move, the turn passes"),
             _ if app.waiting_for_expert() => {
-                format!("{who} is {}…", app.expert.note().unwrap_or_default())
+                let note = app.expert.note(app.game.rules()).unwrap_or_default();
+                format!("{who} is {note}…")
             }
             _ if thinking => format!("{who} is thinking…"),
             Phase::AwaitRoll => format!("{who}: throw the dice"),
@@ -824,8 +828,12 @@ impl Ui<'_> {
                     self.circle_lines(c, 12.0, 1.5, TILE_DOT);
                     self.circle(c, 4.0, CARNELIAN);
                 }
-                let number = path_position(Player::Light, row, col).or(path_position(
-                    Player::Dark,
+                // The mover's numbers, so the far end in Masters, where the
+                // routes cross, matches the move list.
+                let rules = app.game.rules();
+                let mover = app.game.turn();
+                let number = rules.path_position(mover, row, col).or(rules.path_position(
+                    mover.opponent(),
                     row,
                     col,
                 ));
@@ -845,13 +853,14 @@ impl Ui<'_> {
         // Highlight the chosen move's piece and landing square.
         if let Some(opt) = selected.filter(|_| !matches!(app.phase, Phase::Moving { .. })) {
             let player = app.game.turn();
+            let rules = app.game.rules();
             if !opt.mv.is_entry() {
-                let (r, c) = cell_of(player, opt.mv.from).unwrap();
+                let (r, c) = rules.cell_of(player, opt.mv.from).unwrap();
                 let (x, y) = cell_rect(r, c);
                 self.rect_lines(x + 2.0, y + 2.0, CELL - 4.0, CELL - 4.0, 5.0, ACCENT);
             }
-            if !opt.mv.is_bear_off() {
-                let (r, c) = cell_of(player, opt.mv.to).unwrap();
+            if !app.game.is_bear_off(opt.mv) {
+                let (r, c) = rules.cell_of(player, opt.mv.to).unwrap();
                 let (x, y) = cell_rect(r, c);
                 let color = if opt.outcome.captured { DANGER } else { TARGET };
                 self.rect_lines(x + 2.0, y + 2.0, CELL - 4.0, CELL - 4.0, 5.0, color);
@@ -862,6 +871,8 @@ impl Ui<'_> {
     fn board_pieces(&self, app: &App) {
         let anim = app.piece_animation();
         let mover = app.game.turn();
+        let rules = app.game.rules();
+        let path_point = |player, pos| path_point(rules, player, pos);
         for player in Player::ALL {
             for pos in app.game.pieces_on_board(player) {
                 let moving = anim.is_some_and(|a| player == mover && a.mv.from == pos);
@@ -882,7 +893,7 @@ impl Ui<'_> {
             && app.current_is_human()
         {
             let [_, to] = move_targets(app, opt.mv);
-            let r = if opt.mv.is_bear_off() {
+            let r = if app.game.is_bear_off(opt.mv) {
                 RESERVE_R
             } else {
                 PIECE_R
@@ -901,7 +912,7 @@ impl Ui<'_> {
             };
             let pos = start.lerp(path_point(mover, hi), frac);
             let hop = (frac * PI).sin() * 14.0;
-            let r = if a.mv.is_bear_off() && a.travelled >= (a.mv.to - a.mv.from) as f32 {
+            let r = if app.game.is_bear_off(a.mv) && a.travelled >= (a.mv.to - a.mv.from) as f32 {
                 RESERVE_R
             } else {
                 PIECE_R * (1.0 + hop / 120.0)
@@ -917,7 +928,9 @@ impl Ui<'_> {
         let y = RESERVE_Y[player.index()];
         let anim = app.piece_animation().filter(|_| app.game.turn() == player);
         let left_reserve = anim.is_some_and(|a| a.mv.is_entry());
-        let arrived_home = anim.is_some_and(|a| a.mv.is_bear_off() && a.pos == FINISH);
+        let game = &app.game;
+        let arrived_home =
+            anim.is_some_and(|a| game.is_bear_off(a.mv) && a.pos == game.rules().finish());
         let waiting = app.game.waiting(player) - u8::from(left_reserve);
         let finished = app.game.finished(player) + u8::from(arrived_home);
         let active = app.game.turn() == player && !matches!(app.phase, Phase::GameOver(_));
@@ -998,8 +1011,11 @@ impl Ui<'_> {
         };
         let can_throw = app.current_is_human() && app.phase == Phase::AwaitRoll;
         let faded = shown.is_none() || can_throw;
-        for i in 0..4 {
-            let c = vec2(x + 62.0 + i as f32 * 70.0, y + 82.0);
+        let count = app.game.rules().dice();
+        // Centred: Masters throws three dice, Finkel four.
+        let left = x + 62.0 + f32::from(4 - count) * 35.0;
+        for i in 0..count {
+            let c = vec2(left + f32::from(i) * 70.0, y + 82.0);
             let (marked, wobble) = match shown {
                 Some((tips, settled)) => (
                     tips & (1 << i) != 0,
@@ -1109,7 +1125,7 @@ impl Ui<'_> {
                 Align::Left,
             );
             self.text(
-                &short_move(opt.mv),
+                &short_move(app.game.rules(), opt.mv),
                 rx + 32.0,
                 base,
                 17.0,
@@ -1231,7 +1247,7 @@ impl Ui<'_> {
             Align::Center,
         );
         self.text(
-            "You against the computer",
+            &format!("{} rules · you against the computer", app.leaderboard_rules),
             CANVAS_W / 2.0,
             y + 102.0,
             18.0,
@@ -1304,7 +1320,8 @@ impl Ui<'_> {
         let levels = ur_game::ai::Difficulty::ALL;
         for (i, level) in levels.into_iter().enumerate() {
             let ry = header_y + 50.0 + i as f32 * ROW_H;
-            row(&level.to_string(), app.leaderboard.record(level), ry, false);
+            let r = app.leaderboard.record(app.leaderboard_rules, level);
+            row(&level.to_string(), r, ry, false);
         }
         let total_y = header_y + 50.0 + levels.len() as f32 * ROW_H + 14.0;
         self.line(
@@ -1313,7 +1330,12 @@ impl Ui<'_> {
             1.0,
             with_alpha(ACCENT, 0.4),
         );
-        row("Total", app.leaderboard.total(), total_y, true);
+        row(
+            "Total",
+            app.leaderboard.total(app.leaderboard_rules),
+            total_y,
+            true,
+        );
         // Legend: the dots, then what Avg means.
         let legend_y = y + h - 82.0;
         let parts: [(Option<Outcome>, &str); 4] = [
@@ -1338,11 +1360,25 @@ impl Ui<'_> {
             self.text(label, lx, legend_y, 16.0, DIM, false, Align::Left);
             lx += self.text_width(label, 16.0, false) + 18.0;
         }
+        let other = match app.leaderboard_rules {
+            Rules::Finkel => Rules::Masters,
+            Rules::Masters => Rules::Finkel,
+        };
+        if self.button(
+            &format!("{other} rules"),
+            CANVAS_W / 2.0 - 190.0,
+            y + h - 64.0,
+            180.0,
+            38.0,
+            false,
+        ) {
+            press(app, Key::Right, now);
+        }
         if self.button(
             "Back",
-            CANVAS_W / 2.0 - 80.0,
+            CANVAS_W / 2.0 + 10.0,
             y + h - 64.0,
-            160.0,
+            180.0,
             38.0,
             false,
         ) {
@@ -1445,11 +1481,45 @@ impl Ui<'_> {
             screen_height() / self.scale,
             with_alpha(BLACK, 0.6),
         );
-        let (w, h) = (820.0, 600.0);
+        let rules = app.active_rules();
+        let t = crate::app::rules_text(rules);
+        let moving = format!(
+            "Move one piece exactly the number thrown. You can't land on your own piece, but you may jump over pieces. If you can move, you must. {}",
+            t.pass
+        );
+        let mut rosettes = String::from("Landing on a rosette: ");
+        let mut chars = t.rosettes.chars();
+        rosettes.extend(chars.next().map(|c| c.to_ascii_lowercase()));
+        rosettes.push_str(chars.as_str());
+        let sections = [
+            (
+                "Goal",
+                "Be the first to move all seven of your pieces along your path and off the board.",
+            ),
+            ("Path", t.path),
+            ("Dice", t.dice),
+            ("Moving", moving.as_str()),
+            ("Capture", t.capture),
+            ("Rosettes", rosettes.as_str()),
+            (
+                "Risk",
+                "In the move list, \"risk 31%\" is the chance the moved piece can be captured on the opponent's next throw.",
+            ),
+        ];
+        let w = 820.0;
+        let wrapped: Vec<_> = sections
+            .iter()
+            .map(|&(title, body)| (title, self.wrap(body, w - 210.0, 17.0)))
+            .collect();
+        // Tall enough for the text: the title, each section's lines, and
+        // the footer.
+        let lines: usize = wrapped.iter().map(|(_, l)| l.len()).sum();
+        let h = (92.0 + lines as f32 * 24.0 + sections.len() as f32 * 14.0 + 50.0)
+            .clamp(600.0, CANVAS_H - 20.0);
         let (x, y) = ((CANVAS_W - w) / 2.0, (CANVAS_H - h) / 2.0);
         self.panel(x, y, w, h, "");
         self.text(
-            "How to play",
+            &format!("How to play: {rules} rules"),
             x + w / 2.0,
             y + 50.0,
             30.0,
@@ -1457,40 +1527,10 @@ impl Ui<'_> {
             true,
             Align::Center,
         );
-        let sections = [
-            (
-                "Goal",
-                "Be the first to move all seven of your pieces along your path and off the board.",
-            ),
-            (
-                "Path",
-                "Enter on your own row and run left (squares 1-4), along the shared middle row to the right (5-12), back onto your own row (13-14), then off with an exact throw.",
-            ),
-            (
-                "Dice",
-                "Four four-sided dice, each with two marked tips. Your throw is the number of marks showing, 0 to 4. A 2 is most common; 0 and 4 come up only 1 time in 16.",
-            ),
-            (
-                "Moving",
-                "Move one piece exactly the number thrown. You can't land on your own piece, but you may jump over pieces. If you can move, you must. No legal move (or a 0) and your turn passes.",
-            ),
-            (
-                "Capture",
-                "Land on an enemy piece in the middle row and it goes back to start.",
-            ),
-            (
-                "Rosettes",
-                "Landing on a rosette gives you another throw. The middle rosette is also safe from capture.",
-            ),
-            (
-                "Risk",
-                "In the move list, \"risk 31%\" is the chance the moved piece can be captured on the opponent's next throw.",
-            ),
-        ];
         let mut ty = y + 92.0;
-        for (title, body) in sections {
+        for (title, lines) in wrapped {
             self.text(title, x + 40.0, ty, 19.0, ACCENT, true, Align::Left);
-            for line in self.wrap(body, w - 210.0, 17.0) {
+            for line in lines {
                 self.text(&line, x + 170.0, ty, 17.0, TEXT, false, Align::Left);
                 ty += 24.0;
             }

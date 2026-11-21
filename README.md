@@ -9,7 +9,8 @@ modern Iraq) in the 1920s, and one is now in the British Museum. For a long
 time nobody knew how it was played. Then Irving Finkel, a curator at the
 British Museum, translated a Babylonian clay tablet written by a scribe named
 Itti-Marduk-balāṭu in 177 BC that describes the rules. This game follows
-Finkel's reconstruction, which is how the game is usually played today.
+Finkel's reconstruction, which is how the game is usually played today, and
+also offers the Masters rules (see [Masters rules](#masters-rules)).
 
 ```
 cargo run --release
@@ -91,6 +92,34 @@ point up. Each die is a coin flip, so the throws are not equally likely:
 A 2 is the most common throw, and a 0 or a 4 comes up only once in sixteen
 throws. The game shows all four dice, with the marked tips filled in.
 
+## Masters rules
+
+James Masters, of Masters Traditional Games, proposed different rules. As
+RoyalUr.net explains them: most surviving sets came with three or six dice,
+a longer path puts a rosette on every fourth square, and if rosettes were
+safe, the ones on your own row (where you can't be captured anyway) would
+do nothing. These rules, as played on RoyalUr.net, change four things:
+
+- **A longer path that crosses.** After square 11 your path leaves the
+  middle row early and goes round the far end of the board: through the
+  *other side's* corner (12–13), the last square of the middle row (14), and
+  your own corner (15–16), then off with an exact throw (17). The two routes
+  meet head-on there, so a piece is only safe on its first four squares.
+- **Rosettes every fourth square** of the path (4, 8, 12, 16), still giving
+  another throw.
+- **No safe squares.** The middle rosette can be captured on like any other.
+- **Three dice instead of four,** and no marks counts as 4, so a throw is
+  never wasted:
+
+| Throw | 1   | 2   | 3   | 4                |
+|-------|-----|-----|-----|------------------|
+| Odds  | 3/8 | 3/8 | 1/8 | 1/8 (no marks)   |
+
+Still seven pieces each, and Light still moves first. Because the routes
+cross at the far end, the numbers on those five squares change with whose
+turn it is, to match the move list. Press **?** in a game for the rules in
+play.
+
 ## Playing
 
 You need [Rust](https://www.rust-lang.org/tools/install).
@@ -117,16 +146,19 @@ In the window, click the dice to throw, then click a piece (or the square
 it would land on) to move it. Hovering shows where it would go. All the
 keys below work in the window too.
 
-In the menu, choose Human or Computer for each side. The computer has five
-levels: Random, Easy, Medium, Hard and Expert. You can also turn the dice
-and piece animations off there.
+In the menu, choose Human or Computer for each side, and the rules: Finkel
+or Masters (remembered for next time). The computer has five levels:
+Random, Easy, Medium, Hard and Expert. You can also turn the dice and piece
+animations off there.
 
-Expert plays perfectly. The first time you choose it, it works out the whole
-game, which takes about three minutes on a recent laptop and uses about
-800 MB of memory while it runs. The menu shows how far along it is, and you
-can start a game straight away: the Expert waits for the table before its
-first throw. The result is saved (276 MB, beside the saved game), so after
-that it is ready in a moment. Once it's saved, it also makes hints and game
+Expert plays perfectly. The first time you choose it under each set of
+rules, it works out the whole game: about three minutes on a recent laptop
+for Finkel's rules, and about fourteen minutes and 1.3 GB of memory for
+Masters', which has nearly four times as many positions. The menu shows how
+far along it is, and you can start a game straight away: the Expert waits
+for the table before its first throw. The result is saved (276 MB for
+Finkel, 1 GB for Masters, beside the saved game), so after that it is ready
+in a moment. Once it's saved, it also makes hints and game
 reviews exact, whoever you're playing.
 
 | Key           | What it does                              |
@@ -236,7 +268,9 @@ resumed game can still be reviewed at the end.
 ### Leaderboard
 
 **Leaderboard** in the menu shows how you've done against each computer
-level, and across them all:
+level, and across them all. Finkel and Masters games are kept apart, since
+the two play so differently; ← and → (or the button in the window) switch
+between them.
 
 | Column  | Means                                                        |
 |---------|--------------------------------------------------------------|
@@ -270,9 +304,11 @@ removes the save.
 
 Saves go in `~/.local/share/ur-game` on Linux (or under `$XDG_DATA_HOME`),
 `~/Library/Application Support/ur-game` on macOS, and
-`%LOCALAPPDATA%\ur-game` on Windows. Expert's table, `expert-table.bin`,
-goes in the same folder; delete it to free the space, and it is worked out
-again the next time you choose Expert.
+`%LOCALAPPDATA%\ur-game` on Windows. Expert's tables, `expert-finkel.bin`
+(276 MB) and `expert-masters.bin` (1 GB), go in the same folder; delete one
+to free the space, and it is worked out again the next time you choose
+Expert under those rules. (`expert-table.bin`, from earlier versions, is
+removed: the new tables are stored differently.)
 
 ### Preferences
 
@@ -302,6 +338,7 @@ cargo run --release -- --light human --dark hard --start
 | `-d, --dark PLAYER`  | Who plays Dark (default: `medium`)                   |
 | `-s, --start`        | Skip the menu and start a new game straight away     |
 | `-c, --continue`     | Skip the menu and continue the saved game            |
+| `-r, --rules RULES`  | `finkel` or `masters`, for this run (default: the menu's choice) |
 | `--no-save`          | Don't save, and ignore any saved game                |
 | `--no-animation`     | Turn off the dice and piece animations               |
 | `--mute`             | Start with sound muted; press M to enable it          |
@@ -330,7 +367,8 @@ keeps the players it was started with.
   the exact chance of winning from every one of them. Expert plays the
   move with the best chance. It beats Hard in about 61% of games, and
   with perfect play on both sides, the player who moves first wins 51.5%
-  of the time.
+  of the time. Masters' rules have 501,032,952 positions, and there the
+  first player's edge shrinks to 50.5%.
 
 The solver (`src/solver.rs`) finds the chances by value iteration: it
 repeatedly sets each position's chance to the average, over the five
@@ -354,13 +392,14 @@ To have the levels play each other and see the win rates:
 
 ```
 cargo run --release --example arena 400
+cargo run --release --example arena 400 masters
 ```
 
 ## Project layout
 
 | File               | What it is                                                |
 |--------------------|-----------------------------------------------------------|
-| `src/game.rs`      | The rules: board, dice, legal moves, captures, rosettes   |
+| `src/game.rs`      | The rules, Finkel's and Masters': board, dice, legal moves, captures, rosettes |
 | `src/ai.rs`        | The computer players                                      |
 | `src/solver.rs`    | Solving the game exactly, for Expert                      |
 | `src/expert.rs`    | Loading, or working out and saving, Expert's table        |
@@ -385,8 +424,8 @@ The rules and computer players are a library with no screen code in them.
 The window and terminal versions share the same game flow, so they play
 exactly alike.
 
-Run the tests with `cargo test`. Checking the full solve takes a few
-minutes, so it only runs when asked:
+Run the tests with `cargo test`. Checking the full solves takes a while
+(Finkel a few minutes, Masters longer), so they only run when asked:
 `cargo test --release -- --ignored full_game`.
 
 ## License

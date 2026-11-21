@@ -7,6 +7,7 @@
 //!
 //! ```text
 //! ur-game save 1
+//! rules finkel
 //! light human
 //! dark medium
 //! turn light
@@ -20,8 +21,9 @@
 //! log Light rolls 2: enters a piece on 2.
 //! ```
 //!
-//! `dice` is only present when the dice have been thrown but the throw not
-//! yet played; it holds the four tips as bits. `tally` holds each player's
+//! `rules` is `finkel` or `masters` (saves from before Masters have no
+//! `rules` line and are Finkel). `dice` is only present when the dice have been thrown but the throw not
+//! yet played; it holds the dice's tips as bits. `tally` holds each player's
 //! throws, sum of throws, captures, rosettes and hints so far (missing in
 //! older saves, which then count from zero). Each `decision` is a move
 //! choice a human made, for the review at the end: the throw number, the
@@ -33,7 +35,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use ur_game::ai::Difficulty;
-use ur_game::game::{FINISH, GameState, Move, PIECES_PER_PLAYER, Player, START, roll_from_tips};
+use ur_game::game::{GameState, Move, PIECES_PER_PLAYER, Player, Rules, START};
 
 const HEADER: &str = "ur-game save 1";
 
@@ -86,6 +88,7 @@ pub fn remove(path: &Path) -> io::Result<()> {
 impl SavedGame {
     pub fn to_text(&self) -> String {
         let mut out = format!("{HEADER}\n");
+        out += &format!("rules {}\n", rules_name(self.game.rules()));
         for player in Player::ALL {
             let name = player_name(player);
             let controller = controller_name(self.controllers[player.index()]);
@@ -147,9 +150,14 @@ impl SavedGame {
         let mut log = Vec::new();
         let mut tally = [Tally::default(); 2];
         let mut decisions = Vec::new();
+        let mut rules = Rules::Finkel;
         for line in lines {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
+                // Before any decisions, which are positions under these rules.
+                "rules" if decisions.is_empty() => {
+                    rules = Rules::ALL.into_iter().find(|&r| rules_name(r) == value)?
+                }
                 "light" | "dark" => {
                     controllers[parse_player(key)?.index()] = Some(parse_controller(value)?)
                 }
@@ -176,12 +184,12 @@ impl SavedGame {
                         hints,
                     };
                 }
-                "decision" => decisions.push(parse_decision(value)?),
+                "decision" => decisions.push(parse_decision(rules, value)?),
                 "log" => log.push(value.to_string()),
                 _ => return None,
             }
         }
-        let game = GameState::from_positions(turn?, pieces[0]?, pieces[1]?).ok()?;
+        let game = GameState::from_positions_in(rules, turn?, pieces[0]?, pieces[1]?).ok()?;
         if game.winner().is_some() {
             return None; // nothing left to resume
         }
@@ -197,7 +205,7 @@ impl SavedGame {
 }
 
 /// `throw player tips from to` then fourteen piece positions.
-fn parse_decision(text: &str) -> Option<Decision> {
+fn parse_decision(rules: Rules, text: &str) -> Option<Decision> {
     let fields: Vec<&str> = text.split_whitespace().collect();
     let [throw, turn, tips, from, to, rest @ ..] = &fields[..] else {
         return None;
@@ -207,7 +215,8 @@ fn parse_decision(text: &str) -> Option<Decision> {
         return None;
     }
     let pieces = |part: &[&str]| parse_positions(&part.join(" "));
-    let game = GameState::from_positions(
+    let game = GameState::from_positions_in(
+        rules,
         parse_player(turn)?,
         pieces(&rest[..n])?,
         pieces(&rest[n..])?,
@@ -219,7 +228,10 @@ fn parse_decision(text: &str) -> Option<Decision> {
         to: to.parse().ok()?,
     };
     // Only a move that was legal there can be reviewed.
-    if !game.legal_moves(roll_from_tips(tips.into())).contains(&mv) {
+    if !game
+        .legal_moves(rules.roll_from_tips(tips.into()))
+        .contains(&mv)
+    {
         return None;
     }
     Some(Decision {
@@ -230,12 +242,21 @@ fn parse_decision(text: &str) -> Option<Decision> {
     })
 }
 
-/// Every piece's path position (`START` waiting, `FINISH` borne off).
+/// Every piece's path position (`START` waiting, the rules' finish borne
+/// off).
 fn positions(game: &GameState, player: Player) -> Vec<u8> {
     let mut out = vec![START; game.waiting(player) as usize];
     out.extend(game.pieces_on_board(player));
-    out.extend(std::iter::repeat_n(FINISH, game.finished(player) as usize));
+    let finish = game.rules().finish();
+    out.extend(std::iter::repeat_n(finish, game.finished(player) as usize));
     out
+}
+
+fn rules_name(rules: Rules) -> &'static str {
+    match rules {
+        Rules::Finkel => "finkel",
+        Rules::Masters => "masters",
+    }
 }
 
 fn parse_positions(text: &str) -> Option<[u8; PIECES_PER_PLAYER as usize]> {
@@ -351,12 +372,57 @@ mod tests {
             good.replace("tally light 12 25 1 3 2", "tally light 12 25 1 3"),
             good.replace("tally light 12 25 1 3 2", "tally purple 12 25 1 3 2"),
             good.replace("turn dark\n", ""),
+            good.replace("rules finkel", "rules monopoly"),
             good.replace("decision 3 light 7 0 3", "decision 3 light 7 0 4"), // illegal move
             good.replace("decision 3 light 7 0 3", "decision 3 light 7 0"),
             good + "nonsense line\n",
         ] {
             assert_eq!(SavedGame::from_text(&bad), None, "accepted:\n{bad}");
         }
+    }
+
+    #[test]
+    fn masters_games_round_trip_and_old_saves_are_finkel() {
+        let rules = Rules::Masters;
+        let masters = SavedGame {
+            game: GameState::from_positions_in(
+                rules,
+                Player::Dark,
+                [0, 0, 3, 13, 16, 17, 17],
+                [0, 0, 0, 0, 1, 9, 11],
+            )
+            .unwrap(),
+            pending_tips: Some(0b101),
+            decisions: vec![Decision {
+                throw: 3,
+                game: GameState::from_positions_in(
+                    rules,
+                    Player::Light,
+                    [0, 0, 0, 0, 0, 0, 2],
+                    [0; 7],
+                )
+                .unwrap(),
+                tips: 0b000,
+                mv: Move { from: 2, to: 6 }, // no marks: 4 under Masters
+            }],
+            ..sample()
+        };
+        let text = masters.to_text();
+        assert!(text.contains("\nrules masters\n"), "{text}");
+        assert_eq!(SavedGame::from_text(&text), Some(masters));
+        // Saves from before Masters have no rules line.
+        let old: String = sample()
+            .to_text()
+            .lines()
+            .filter(|l| !l.starts_with("rules"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(SavedGame::from_text(&old), Some(sample()));
+        // A Masters position doesn't load as Finkel.
+        assert_eq!(
+            SavedGame::from_text(&text.replace("rules masters", "rules finkel")),
+            None
+        );
     }
 
     #[test]

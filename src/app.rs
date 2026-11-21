@@ -13,17 +13,14 @@ use crate::expert::Expert;
 use crate::preferences::{self, Preferences};
 use crate::save::{self, SavedGame};
 use crate::sound::Cue;
-use crate::stats::{self, Leaderboard};
+use crate::stats::{self, Leaderboards};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use std::time::Duration;
 use ur_game::ai::{self, Difficulty};
-use ur_game::game::{
-    FINISH, GameState, Move, Outcome, Player, ROLL_WAYS, SAFE_ROSETTE, START, is_shared,
-    roll_from_tips,
-};
+use ur_game::game::{GameState, Move, Outcome, Player, Rules, START};
 use ur_game::solver;
 
 /// A point in time, measured from when the program started. The front end
@@ -117,6 +114,7 @@ pub enum MenuItem {
     Continue,
     Light,
     Dark,
+    Rules,
     Animation,
     Start,
     Leaderboard,
@@ -124,10 +122,11 @@ pub enum MenuItem {
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 7] = [
+    pub const ALL: [MenuItem; 8] = [
         MenuItem::Continue,
         MenuItem::Light,
         MenuItem::Dark,
+        MenuItem::Rules,
         MenuItem::Animation,
         MenuItem::Start,
         MenuItem::Leaderboard,
@@ -350,7 +349,11 @@ pub struct App {
     pub log_scroll: usize,
     /// This game's running totals, per player.
     pub tally: [Tally; 2],
-    pub leaderboard: Leaderboard,
+    /// The rules a new game is played by (chosen in the menu).
+    pub rules: Rules,
+    /// Which rule set's records the leaderboard screen shows.
+    pub leaderboard_rules: Rules,
+    pub leaderboard: Leaderboards,
     /// Text a front end should put on the clipboard (taken once).
     pub clipboard: Option<String>,
     pub show_help: bool,
@@ -400,7 +403,9 @@ impl App {
             log: Vec::new(),
             log_scroll: 0,
             tally: [Tally::default(); 2],
-            leaderboard: Leaderboard::default(),
+            rules: Rules::Finkel,
+            leaderboard_rules: Rules::Finkel,
+            leaderboard: Leaderboards::default(),
             clipboard: None,
             stats_path: None,
             chronicle_dir: None,
@@ -432,6 +437,8 @@ impl App {
         self.sound_enabled = saved.sound;
         self.sound_volume = saved.volume;
         self.animations = saved.animations;
+        self.rules = saved.rules;
+        self.leaderboard_rules = saved.rules;
         self.preferences = saved;
         self.preferences_path = Some(path);
     }
@@ -459,16 +466,26 @@ impl App {
     }
 
     /// Get the Expert level ready when it's first chosen, keeping its
-    /// solved table at `path`.
-    pub fn use_expert_table(&mut self, path: Option<PathBuf>) {
-        self.expert = Expert::new(path);
-        self.expert.load_if_saved();
+    /// solved tables in `dir`. A table saved earlier is loaded when its
+    /// rules are first in use, for hints and reviews.
+    pub fn use_expert_tables(&mut self, dir: Option<PathBuf>) {
+        self.expert = Expert::new(dir);
+    }
+
+    /// The rules in play: the game's on the game screen, otherwise the
+    /// ones chosen in the menu.
+    pub fn active_rules(&self) -> Rules {
+        if self.screen == Screen::Game {
+            self.game.rules()
+        } else {
+            self.rules
+        }
     }
 
     /// How a seat is shown in the menu: like [`Controller::label`], but an
     /// Expert still getting ready says how far along it is.
     pub fn controller_label(&self, controller: Controller) -> String {
-        match (controller, self.expert.short_note()) {
+        match (controller, self.expert.short_note(self.active_rules())) {
             (Controller::Computer(Difficulty::Expert), Some(note)) => format!("Expert · {note}"),
             _ => controller.label(),
         }
@@ -478,7 +495,7 @@ impl App {
     pub fn waiting_for_expert(&self) -> bool {
         self.screen == Screen::Game
             && self.controller(self.game.turn()) == Controller::Computer(Difficulty::Expert)
-            && self.expert.busy()
+            && self.expert.busy(self.game.rules())
     }
 
     /// Write shared chronicles into `dir`.
@@ -674,13 +691,26 @@ impl App {
         match self.screen {
             Screen::Menu => self.menu_key(key.code, now),
             Screen::Game => self.game_key(key.code, now),
-            Screen::Leaderboard => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
+            Screen::Leaderboard => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.screen = Screen::Menu;
                     self.cue(Cue::Menu);
                 }
-            }
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h' | 'l') => {
+                    self.switch_leaderboard_rules();
+                }
+                _ => {}
+            },
         }
+    }
+
+    /// Show the other rule set's records on the leaderboard.
+    pub fn switch_leaderboard_rules(&mut self) {
+        self.leaderboard_rules = match self.leaderboard_rules {
+            Rules::Finkel => Rules::Masters,
+            Rules::Masters => Rules::Finkel,
+        };
+        self.cue(Cue::Menu);
     }
 
     /// Scroll the Chronicle: positive goes back in time.
@@ -737,6 +767,7 @@ impl App {
             self.controllers,
             self.animations,
             self.screen,
+            self.rules,
         );
         let items = self.menu_items();
         let n = items.len();
@@ -755,6 +786,14 @@ impl App {
                 match item {
                     MenuItem::Light => self.controllers[0] = self.controllers[0].cycle(step),
                     MenuItem::Dark => self.controllers[1] = self.controllers[1].cycle(step),
+                    MenuItem::Rules => {
+                        let all = Rules::ALL;
+                        let i = all.iter().position(|&r| r == self.rules).unwrap_or(0);
+                        self.rules =
+                            all[(i as isize + step).rem_euclid(all.len() as isize) as usize];
+                        self.preferences.rules = self.rules;
+                        self.save_preferences();
+                    }
                     MenuItem::Animation => {
                         self.animations = !self.animations;
                         self.preferences.animations = self.animations;
@@ -766,6 +805,7 @@ impl App {
                     MenuItem::Leaderboard
                         if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) =>
                     {
+                        self.leaderboard_rules = self.rules;
                         self.screen = Screen::Leaderboard;
                     }
                     MenuItem::Start if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) => {
@@ -785,6 +825,7 @@ impl App {
             self.controllers,
             self.animations,
             self.screen,
+            self.rules,
         );
         if before != after {
             self.cue(Cue::Menu);
@@ -884,11 +925,13 @@ impl App {
 
     pub fn update(&mut self, now: Time) {
         self.now = now;
+        let rules = self.active_rules();
+        self.expert.load_if_saved(rules);
         if self
             .controllers
             .contains(&Controller::Computer(Difficulty::Expert))
         {
-            self.expert.prepare();
+            self.expert.prepare(rules);
         }
         if self.screen != Screen::Game || self.show_help {
             return;
@@ -930,7 +973,7 @@ impl App {
     fn landing_sound(&mut self, option: MoveOption) {
         self.cue(if option.outcome.captured {
             Cue::Capture
-        } else if option.mv.is_bear_off() {
+        } else if self.game.is_bear_off(option.mv) {
             Cue::Home
         } else {
             Cue::Move
@@ -971,7 +1014,7 @@ impl App {
         let saved = self.resumable.as_ref()?;
         let begun = saved.tally.iter().any(|t| t.throws > 0)
             || saved.pending_tips.is_some()
-            || saved.game != GameState::new();
+            || saved.game != GameState::with_rules(saved.game.rules());
         if !begun {
             return None;
         }
@@ -986,11 +1029,16 @@ impl App {
         // Walking away from a game against the computer counts as a loss,
         // so a losing game can't be dodged.
         let forfeit = self.forfeit_level();
+        let forfeit_rules = self
+            .resumable
+            .as_ref()
+            .map_or(self.rules, |s| s.game.rules());
         if let Some(level) = forfeit {
-            self.leaderboard.add(level, stats::Outcome::Abandoned, None);
+            self.leaderboard
+                .add(forfeit_rules, level, stats::Outcome::Abandoned, None);
         }
         self.screen = Screen::Game;
-        self.game = GameState::new();
+        self.game = GameState::with_rules(self.rules);
         self.dice = None;
         self.log.clear();
         self.log_scroll = 0;
@@ -999,12 +1047,13 @@ impl App {
         self.decisions.clear();
         self.review = None;
         self.push_log(format!(
-            "New game: Light ({}) vs Dark ({}).",
+            "New game: Light ({}) vs Dark ({}), {} rules.",
             self.controllers[0].label(),
-            self.controllers[1].label()
+            self.controllers[1].label(),
+            self.rules
         ));
         if let Some(level) = forfeit {
-            let r = self.leaderboard.record(level);
+            let r = self.leaderboard.record(forfeit_rules, level);
             self.push_log(format!(
                 "The unfinished game against {level} counts as a loss. Record: {} of {} won ({}%).",
                 r.won,
@@ -1047,10 +1096,11 @@ impl App {
 
     fn roll(&mut self, now: Time) {
         self.cue(Cue::Dice);
-        let tips = (self.rng.next_u32() & 0b1111) as u8;
+        let rules = self.game.rules();
+        let tips = (self.rng.next_u32() & ((1 << rules.dice()) - 1)) as u8;
         let tally = &mut self.tally[self.game.turn().index()];
         tally.throws += 1;
-        tally.pips += u32::from(roll_from_tips(tips.into()));
+        tally.pips += u32::from(rules.roll_from_tips(tips.into()));
         // Saved before anyone sees it, so quitting can't undo a bad throw.
         self.autosave(Some(tips));
         if self.animations {
@@ -1065,7 +1115,7 @@ impl App {
     fn resolve_roll(&mut self, tips: u8, now: Time) {
         self.hint = None;
         let player = self.game.turn();
-        let roll = roll_from_tips(tips as u32);
+        let roll = self.game.rules().roll_from_tips(tips as u32);
         self.dice = Some(Dice {
             player,
             tips,
@@ -1142,7 +1192,7 @@ impl App {
         let text = format!(
             "Hint for {}: {} ({}).",
             self.game.turn(),
-            describe_move(options[hint.best].mv),
+            describe_move(self.game.rules(), options[hint.best].mv),
             hint.reasons[hint.best]
         );
         if let Phase::Choosing { selected, .. } = &mut self.phase {
@@ -1190,7 +1240,10 @@ impl App {
             self.landing_sound(option);
         }
         let n = self.throw_number();
-        let mut text = format!("{n}. {player} rolls {roll}: {}", describe_move(mv));
+        let mut text = format!(
+            "{n}. {player} rolls {roll}: {}",
+            describe_move(self.game.rules(), mv)
+        );
         let tally = &mut self.tally[player.index()];
         if outcome.captured {
             text.push_str(", captures");
@@ -1223,7 +1276,7 @@ impl App {
             .decisions
             .iter()
             .filter_map(|&decision| {
-                let roll = roll_from_tips(decision.tips.into());
+                let roll = decision.game.rules().roll_from_tips(decision.tips.into());
                 let options = move_options(&decision.game, roll);
                 let played = options.iter().position(|o| o.mv == decision.mv)?;
                 let hint = analyse(&decision.game, roll, &options);
@@ -1281,7 +1334,7 @@ impl App {
         review.index = index.min(review.steps.len() - 1);
         let step = review.step().clone();
         let d = step.decision;
-        let roll = roll_from_tips(d.tips.into());
+        let roll = d.game.rules().roll_from_tips(d.tips.into());
         self.game = d.game;
         self.dice = Some(Dice {
             player: d.game.turn(),
@@ -1402,8 +1455,9 @@ impl App {
         } else {
             stats::Outcome::Lost
         };
-        self.leaderboard.add(level, outcome, Some(n));
-        let r = self.leaderboard.record(level);
+        let rules = self.game.rules();
+        self.leaderboard.add(rules, level, outcome, Some(n));
+        let r = self.leaderboard.record(rules, level);
         let mut line = format!(
             "Your record against {level}: {} of {} won ({}%).",
             r.won,
@@ -1501,7 +1555,7 @@ fn analyse(game: &GameState, roll: u8, options: &[MoveOption]) -> Hint {
         .into_iter()
         .map(|(_, score)| score)
         .collect();
-    let exact = HINT_LEVEL == Difficulty::Expert && solver::installed().is_some();
+    let exact = HINT_LEVEL == Difficulty::Expert && solver::installed(game.rules()).is_some();
     let scale = if exact { 100.0 } else { 1.0 };
     let best = (0..scores.len()).fold(0, |b, i| if scores[i] > scores[b] { i } else { b });
     let loss: Vec<f64> = scores.iter().map(|s| scale * (scores[best] - s)).collect();
@@ -1557,20 +1611,26 @@ struct Traits {
     /// Ways (sixteenths) the moved piece could hit an enemy piece ahead of
     /// it on the mover's next throw.
     threat: u8,
+    /// Leaves or lands on a safe square (Finkel's middle rosette).
+    from_safe: bool,
+    to_safe: bool,
+    bears_off: bool,
 }
 
 impl Traits {
     fn of(game: &GameState, roll: u8, option: &MoveOption) -> Self {
         let me = game.turn();
+        let rules = game.rules();
         let mv = option.mv;
         let mut after = *game;
         after.apply(roll, mv).expect("legal move");
+        let ways = rules.roll_ways();
         let threat = (1..=4u8)
             .filter(|&d| {
                 let target = mv.to + d;
-                is_shared(target) && target != SAFE_ROSETTE && after.occupies(me.opponent(), target)
+                !rules.is_safe(target) && after.enemy_on(me, target)
             })
-            .map(|d| ROLL_WAYS[d as usize])
+            .map(|d| ways[d as usize])
             .sum();
         Traits {
             mv,
@@ -1580,6 +1640,9 @@ impl Traits {
             risk_before: game.capture_ways(me, mv.from),
             risk_after: option.risk,
             threat,
+            from_safe: rules.is_safe(mv.from),
+            to_safe: rules.is_safe(mv.to),
+            bears_off: game.is_bear_off(mv),
         }
     }
 
@@ -1595,11 +1658,11 @@ impl Traits {
             format!("captures on {}", self.mv.to)
         } else if self.escapes() {
             format!("escapes {}% danger", risk_percent(self.risk_before))
-        } else if self.mv.to == SAFE_ROSETTE {
+        } else if self.to_safe {
             "takes middle rosette".into()
         } else if self.extra_turn {
             "extra throw".into()
-        } else if self.mv.to == FINISH {
+        } else if self.bears_off {
             "bears a piece off".into()
         } else if self.threat > 0 && self.risk_after == 0 {
             format!("sets up a {}% hit", risk_percent(self.threat))
@@ -1618,7 +1681,7 @@ impl Traits {
             "misses the win".into()
         } else if best.captures && !self.captures {
             format!("misses capture on {}", best.mv.to)
-        } else if self.mv.from == SAFE_ROSETTE && best.mv.from != SAFE_ROSETTE {
+        } else if self.from_safe && !best.from_safe {
             "gives up mid rosette".into()
         } else if best.escapes() && self.mv.from != best.mv.from {
             format!(
@@ -1628,11 +1691,11 @@ impl Traits {
             )
         } else if self.risk_after > best.risk_after {
             format!("{}% risk of capture", risk_percent(self.risk_after))
-        } else if best.mv.to == SAFE_ROSETTE && self.mv.to != SAFE_ROSETTE {
+        } else if best.to_safe && !self.to_safe {
             "misses middle rosette".into()
         } else if best.extra_turn && !self.extra_turn {
             "misses extra throw".into()
-        } else if best.mv.to == FINISH && self.mv.to != FINISH {
+        } else if best.bears_off && !self.bears_off {
             "doesn't bear off".into()
         } else if best.threat > self.threat {
             if self.threat == 0 {
@@ -1643,6 +1706,52 @@ impl Traits {
         } else {
             "weaker a few turns on".into()
         }
+    }
+}
+
+/// The rules explained, for the help screens: a sentence or two on each
+/// topic, and a one-line version for small screens.
+pub struct RulesText {
+    pub path: &'static str,
+    pub path_short: &'static str,
+    /// The path heading's note on numbering.
+    pub numbers: &'static str,
+    pub dice: &'static str,
+    pub dice_short: &'static str,
+    /// When the turn passes.
+    pub pass: &'static str,
+    pub capture: &'static str,
+    pub capture_short: &'static str,
+    pub rosettes: &'static str,
+    pub rosettes_short: &'static str,
+}
+
+pub fn rules_text(rules: Rules) -> RulesText {
+    match rules {
+        Rules::Finkel => RulesText {
+            path: "Enter on your own row and run left (1–4), along the shared middle row to the right (5–12), back onto your own row (13–14), then off with an exact throw.",
+            path_short: "your row 1–4 (left), middle row 5–12 (right), your row 13–14, then off with an exact throw.",
+            numbers: "squares are numbered 1–14 on the board",
+            dice: "Four 4-sided dice with two marked tips each. Your throw is the marks showing (0–4); 2 is most common, 0 and 4 just 1 time in 16.",
+            dice_short: "count the marked tips, 0–4. 2 is the most likely.",
+            pass: "No legal move (or a 0): your turn passes.",
+            capture: "Land on an enemy in the middle row: it goes back to start.",
+            capture_short: "Land on an enemy in the middle row to send it back.",
+            rosettes: "Throw again. The middle rosette is also safe from capture.",
+            rosettes_short: "Rosettes give another throw; the middle one is safe.",
+        },
+        Rules::Masters => RulesText {
+            path: "Enter on your own row and run left (1–4), along the middle row to the right (5–11), then round the far end: the other side's corner (12–13), the end of the middle row (14) and your own corner (15–16), then off with an exact throw. The routes cross at the far end.",
+            path_short: "your row 1–4, middle row 5–11, round the far end 12–16 through their corner, then off exactly.",
+            numbers: "squares 1–16; at the far end, numbered for whoever moves",
+            dice: "Three 4-sided dice with two marked tips each. Your throw is the marks showing, and no marks counts as 4: 1 or 2 three times in 8, 3 or 4 once in 8.",
+            dice_short: "three dice: count the marked tips, 1–3; no marks is 4.",
+            pass: "No legal move: your turn passes.",
+            capture: "Land on an enemy anywhere past your first four squares: it goes back to start.",
+            capture_short: "Land on an enemy past your first four squares to send it back.",
+            rosettes: "Throw again. No square is safe under these rules, rosettes included.",
+            rosettes_short: "Rosettes give another throw, but none is safe.",
+        },
     }
 }
 
@@ -1658,10 +1767,10 @@ pub fn entry_player(entry: &str) -> Option<Player> {
 }
 
 /// Human-readable move, using the mover's path square numbers.
-pub fn describe_move(mv: Move) -> String {
+pub fn describe_move(rules: Rules, mv: Move) -> String {
     match (mv.from, mv.to) {
         (START, to) => format!("enters a piece on {to}"),
-        (from, FINISH) => format!("bears off from {from}"),
+        (from, to) if to == rules.finish() => format!("bears off from {from}"),
         (from, to) => format!("moves {from} → {to}"),
     }
 }
@@ -1772,15 +1881,11 @@ mod tests {
     fn bearing_off_has_a_home_cue_and_winning_adds_victory() {
         for winning in [false, true] {
             let (mut app, now) = game_app(Controller::Human, Controller::Human);
-            let mut light = if winning { [FINISH; 7] } else { [START; 7] };
+            let mut light = if winning { [15; 7] } else { [START; 7] };
             light[0] = 14;
             app.game = GameState::from_positions(Player::Light, light, [START; 7]).unwrap();
             app.resolve_roll(1, now);
-            let off = app
-                .options()
-                .iter()
-                .position(|o| o.mv.is_bear_off())
-                .unwrap();
+            let off = app.options().iter().position(|o| o.mv.to == 15).unwrap();
             app.play(off, now);
             let expected = if winning {
                 vec![Cue::Home, Cue::Victory]
@@ -1848,6 +1953,7 @@ mod tests {
         app.handle_key(key(KeyCode::Up), now); // Animation
         app.handle_key(key(KeyCode::Enter), now);
         assert!(!app.animations);
+        app.handle_key(key(KeyCode::Up), now); // Rules
         app.handle_key(key(KeyCode::Up), now); // Dark
         app.handle_key(key(KeyCode::Right), now);
         assert_eq!(app.controllers[1], Controller::Computer(Difficulty::Hard));
@@ -1855,11 +1961,16 @@ mod tests {
         assert_eq!(app.controllers[1], Controller::Computer(Difficulty::Expert));
         app.handle_key(key(KeyCode::Right), now);
         assert_eq!(app.controllers[1], Controller::Human); // wraps
-        app.handle_key(key(KeyCode::Down), now);
-        app.handle_key(key(KeyCode::Down), now);
+        app.handle_key(key(KeyCode::Down), now); // Rules
+        app.handle_key(key(KeyCode::Right), now);
+        assert_eq!(app.rules, Rules::Masters);
+        app.handle_key(key(KeyCode::Down), now); // Animation
+        app.handle_key(key(KeyCode::Down), now); // New game
         app.handle_key(key(KeyCode::Enter), now);
         assert_eq!(app.screen, Screen::Game);
         assert_eq!(app.phase, Phase::AwaitRoll);
+        assert_eq!(app.game.rules(), Rules::Masters);
+        assert!(app.log[0].ends_with("Masters rules."), "{}", app.log[0]);
     }
 
     #[test]
@@ -2022,7 +2133,7 @@ mod tests {
         assert!(app.log.iter().any(|l| l.starts_with("Light: ")));
         assert!(app.log.iter().any(|l| l.starts_with("Dark: ")));
         // Computer-vs-computer games stay off the leaderboard.
-        assert_eq!(app.leaderboard.total().played, 0);
+        assert_eq!(app.leaderboard.total(Rules::Finkel).played, 0);
         assert_eq!(app.deadline(), None);
         app.handle_key(key(KeyCode::Char('n')), now);
         assert_eq!(app.game, GameState::new());
@@ -2061,7 +2172,7 @@ mod tests {
                 .iter()
                 .any(|l| l == &format!("{winner} wins the game after {throws} throws!"))
         );
-        let record = app.leaderboard.record(Difficulty::Easy);
+        let record = app.leaderboard.record(Rules::Finkel, Difficulty::Easy);
         assert_eq!(record.played, 1);
         assert_eq!(record.average_throws(), Some(f64::from(throws)));
         assert_eq!(record.won, u32::from(winner == Player::Light));
@@ -2075,10 +2186,15 @@ mod tests {
         app.handle_key(key(KeyCode::Char('n')), now);
         assert_eq!(app.tally, [Tally::default(); 2]);
         play_out(&mut app, now);
-        assert_eq!(app.leaderboard.record(Difficulty::Easy).played, 2);
+        assert_eq!(
+            app.leaderboard
+                .record(Rules::Finkel, Difficulty::Easy)
+                .played,
+            2
+        );
         let (mut friends, now) = game_app(Controller::Human, Controller::Human);
         play_out(&mut friends, now);
-        assert_eq!(friends.leaderboard.total().played, 0);
+        assert_eq!(friends.leaderboard.total(Rules::Finkel).played, 0);
     }
 
     #[test]
@@ -2090,7 +2206,7 @@ mod tests {
         app.handle_key(key(KeyCode::Esc), now);
         app.menu_selected = MenuItem::Start;
         app.handle_key(key(KeyCode::Enter), now);
-        assert_eq!(app.leaderboard.total().played, 0);
+        assert_eq!(app.leaderboard.total(Rules::Finkel).played, 0);
 
         // Throw once, leave for the menu, and start again.
         app.handle_key(key(KeyCode::Enter), now);
@@ -2103,9 +2219,9 @@ mod tests {
         app.controllers[1] = Controller::Computer(Difficulty::Hard);
         app.menu_selected = MenuItem::Start;
         app.handle_key(key(KeyCode::Enter), now);
-        let r = app.leaderboard.record(Difficulty::Medium);
+        let r = app.leaderboard.record(Rules::Finkel, Difficulty::Medium);
         assert_eq!((r.played, r.won), (1, 0));
-        assert_eq!(app.leaderboard.total().played, 1);
+        assert_eq!(app.leaderboard.total(Rules::Finkel).played, 1);
         assert!(app.log.iter().any(|l| l.starts_with(
             "The unfinished game against Medium counts as a loss. Record: 0 of 1 won (0%)."
         )));
@@ -2114,7 +2230,7 @@ mod tests {
         // Finishing a game leaves nothing to forfeit.
         play_out(&mut app, now);
         assert_eq!(app.forfeit_level(), None);
-        assert_eq!(app.leaderboard.total().played, 2);
+        assert_eq!(app.leaderboard.total(Rules::Finkel).played, 2);
 
         // Two humans never forfeit.
         let (mut friends, now) = game_app(Controller::Human, Controller::Human);
@@ -2133,7 +2249,12 @@ mod tests {
         assert!(!app.decisions.is_empty());
         for d in &app.decisions {
             assert_eq!(d.game.turn(), Player::Light);
-            assert!(d.game.legal_moves(roll_from_tips(d.tips.into())).len() > 1);
+            assert!(
+                d.game
+                    .legal_moves(Rules::Finkel.roll_from_tips(d.tips.into()))
+                    .len()
+                    > 1
+            );
         }
         let end_game = app.game;
         let log_len = app.log.len();
@@ -2245,7 +2366,13 @@ mod tests {
         play_out(&mut app, now);
         let mut again = App::new(0);
         again.use_stats_file(path);
-        assert_eq!(again.leaderboard.record(Difficulty::Hard).played, 1);
+        assert_eq!(
+            again
+                .leaderboard
+                .record(Rules::Finkel, Difficulty::Hard)
+                .played,
+            1
+        );
         std::fs::remove_dir_all(dir).unwrap();
 
         again.menu_selected = MenuItem::Leaderboard;

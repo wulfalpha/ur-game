@@ -35,7 +35,7 @@ fn main() -> io::Result<()> {
         stats::default_path(),
         chronicle::default_dir(),
     );
-    app.use_expert_table(expert::default_path());
+    app.use_expert_tables(expert::default_dir());
     if terminal {
         tui::run(app, start)
     } else {

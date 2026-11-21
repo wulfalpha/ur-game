@@ -1,6 +1,7 @@
 //! Presentation preferences, stored separately from the game in progress.
 use std::path::{Path, PathBuf};
 use std::{fs, io};
+use ur_game::game::Rules;
 
 const HEADER: &str = "ur-game preferences 1";
 
@@ -9,6 +10,8 @@ pub struct Preferences {
     pub sound: bool,
     pub volume: f32,
     pub animations: bool,
+    /// The rules new games are played by.
+    pub rules: Rules,
 }
 
 impl Default for Preferences {
@@ -17,6 +20,7 @@ impl Default for Preferences {
             sound: true,
             volume: 0.5,
             animations: true,
+            rules: Rules::Finkel,
         }
     }
 }
@@ -30,6 +34,8 @@ impl Preferences {
         let mut sound = None;
         let mut volume = None;
         let mut animations = None;
+        // Files from before Masters had no rules line.
+        let mut rules = Rules::Finkel;
         for line in lines {
             let (key, value) = line.split_once(' ')?;
             match key {
@@ -42,6 +48,11 @@ impl Preferences {
                     volume = Some(v);
                 }
                 "animations" => animations = Some(value.parse().ok()?),
+                "rules" => {
+                    rules = Rules::ALL
+                        .into_iter()
+                        .find(|r| r.to_string().to_lowercase() == value)?
+                }
                 _ => return None,
             }
         }
@@ -49,13 +60,17 @@ impl Preferences {
             sound: sound?,
             volume: volume?,
             animations: animations?,
+            rules,
         })
     }
 
     fn text(self) -> String {
         format!(
-            "{HEADER}\nsound {}\nvolume {}\nanimations {}\n",
-            self.sound, self.volume, self.animations
+            "{HEADER}\nsound {}\nvolume {}\nanimations {}\nrules {}\n",
+            self.sound,
+            self.volume,
+            self.animations,
+            self.rules.to_string().to_lowercase()
         )
     }
 }
@@ -131,8 +146,15 @@ mod tests {
             sound: false,
             volume: 0.3,
             animations: false,
+            rules: Rules::Masters,
         };
         assert_eq!(Preferences::parse(&settings.text()), Some(settings));
+        // Files from before Masters still load, as Finkel.
+        let old = settings.text().replace("rules masters\n", "");
+        assert_eq!(
+            Preferences::parse(&old).map(|p| p.rules),
+            Some(Rules::Finkel)
+        );
         for bad in ["NaN", "inf", "-0.1", "1.1", "loud"] {
             assert_eq!(
                 Preferences::parse(
