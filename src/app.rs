@@ -780,7 +780,31 @@ impl App {
     // Game flow
     // ------------------------------------------------------------------
 
+    /// The computer level an unfinished game was against, if starting a new
+    /// game now would forfeit it. A game counts as begun once anyone has
+    /// thrown the dice.
+    pub fn forfeit_level(&self) -> Option<Difficulty> {
+        let saved = self.resumable.as_ref()?;
+        let begun = saved.tally.iter().any(|t| t.throws > 0)
+            || saved.pending_tips.is_some()
+            || saved.game != GameState::new();
+        if !begun {
+            return None;
+        }
+        match saved.controllers {
+            [Controller::Human, Controller::Computer(d)]
+            | [Controller::Computer(d), Controller::Human] => Some(d),
+            _ => None,
+        }
+    }
+
     pub fn new_game(&mut self, now: Time) {
+        // Walking away from a game against the computer counts as a loss,
+        // so a losing game can't be dodged.
+        let forfeit = self.forfeit_level();
+        if let Some(level) = forfeit {
+            self.leaderboard.add(level, false);
+        }
         self.screen = Screen::Game;
         self.game = GameState::new();
         self.dice = None;
@@ -793,6 +817,16 @@ impl App {
             self.controllers[0].label(),
             self.controllers[1].label()
         ));
+        if let Some(level) = forfeit {
+            let r = self.leaderboard.record(level);
+            self.push_log(format!(
+                "The unfinished game against {level} counts as a loss. Record: {} of {} won ({}%).",
+                r.won,
+                r.played,
+                r.win_percent().unwrap_or(0)
+            ));
+            self.store_leaderboard();
+        }
         self.start_turn(now);
     }
 
@@ -1054,6 +1088,10 @@ impl App {
             r.played,
             r.win_percent().unwrap_or(0)
         ));
+        self.store_leaderboard();
+    }
+
+    fn store_leaderboard(&mut self) {
         if let Some(path) = &self.stats_path
             && let Err(e) = stats::store(path, &self.leaderboard)
         {
@@ -1612,6 +1650,48 @@ mod tests {
         let (mut friends, now) = game_app(Controller::Human, Controller::Human);
         play_out(&mut friends, now);
         assert_eq!(friends.leaderboard.total().played, 0);
+    }
+
+    #[test]
+    fn abandoning_a_begun_game_against_the_computer_counts_as_a_loss() {
+        let (mut app, mut now) =
+            game_app(Controller::Human, Controller::Computer(Difficulty::Medium));
+        // Nobody has thrown yet: walking away is free.
+        assert_eq!(app.forfeit_level(), None);
+        app.handle_key(key(KeyCode::Esc), now);
+        app.menu_selected = MenuItem::Start;
+        app.handle_key(key(KeyCode::Enter), now);
+        assert_eq!(app.leaderboard.total().played, 0);
+
+        // Throw once, leave for the menu, and start again.
+        app.handle_key(key(KeyCode::Enter), now);
+        now += PASS_DELAY;
+        app.update(now);
+        assert_eq!(app.forfeit_level(), Some(Difficulty::Medium));
+        app.handle_key(key(KeyCode::Esc), now);
+        // Even if the menu now names other players, the forfeit is the
+        // abandoned game's.
+        app.controllers[1] = Controller::Computer(Difficulty::Hard);
+        app.menu_selected = MenuItem::Start;
+        app.handle_key(key(KeyCode::Enter), now);
+        let r = app.leaderboard.record(Difficulty::Medium);
+        assert_eq!((r.played, r.won), (1, 0));
+        assert_eq!(app.leaderboard.total().played, 1);
+        assert!(app.log.iter().any(|l| l.starts_with(
+            "The unfinished game against Medium counts as a loss. Record: 0 of 1 won (0%)."
+        )));
+        assert_eq!(app.forfeit_level(), None);
+
+        // Finishing a game leaves nothing to forfeit.
+        play_out(&mut app, now);
+        assert_eq!(app.forfeit_level(), None);
+        assert_eq!(app.leaderboard.total().played, 2);
+
+        // Two humans never forfeit.
+        let (mut friends, now) = game_app(Controller::Human, Controller::Human);
+        friends.handle_key(key(KeyCode::Enter), now);
+        friends.update(now + PASS_DELAY);
+        assert_eq!(friends.forfeit_level(), None);
     }
 
     #[test]

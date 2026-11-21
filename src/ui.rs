@@ -221,7 +221,14 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                         style,
                     ))
                 }
-                MenuItem::Start => Line::from(Span::styled(format!("{cursor}New game"), style)),
+                MenuItem::Start => {
+                    let note = if app.forfeit_level().is_some() {
+                        " (forfeits saved)"
+                    } else {
+                        ""
+                    };
+                    Line::from(Span::styled(format!("{cursor}New game{note}"), style))
+                }
                 MenuItem::Leaderboard => {
                     Line::from(Span::styled(format!("{cursor}Leaderboard"), style))
                 }

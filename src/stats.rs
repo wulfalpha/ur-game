@@ -1,6 +1,7 @@
 //! The local leaderboard: how a human has done against each computer level.
 //!
-//! Only finished games between one human and one computer player count.
+//! Only games between one human and one computer player count: finished
+//! games, and unfinished ones abandoned for a new game, which count as losses.
 //! The record is a small text file next to the saved game:
 //!
 //! ```text

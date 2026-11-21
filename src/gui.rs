@@ -597,6 +597,9 @@ impl Ui<'_> {
                             };
                             format!("Continue ({} vs {})", name(l), name(d))
                         }
+                        MenuItem::Start if app.forfeit_level().is_some() => {
+                            "New game (forfeits saved)".to_string()
+                        }
                         MenuItem::Start => "New game".to_string(),
                         MenuItem::Leaderboard => "Leaderboard".to_string(),
                         _ => "Quit".to_string(),

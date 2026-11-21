@@ -202,8 +202,10 @@ terminals that allow it; on a local Mac it uses `pbcopy` as well.
 **Leaderboard** in the menu shows how you've done against each computer
 level: games played, won and lost, and your win percentage. Every finished
 game between a human and a computer player counts, by the computer's
-level. Games between two humans or two computers, and games left
-unfinished, don't count. The leaderboard is kept in `stats.txt` beside the
+level. Games between two humans or two computers don't count. Starting a
+new game over an unfinished one against the computer counts that game as a
+loss (the menu warns with "New game (forfeits saved)"); a game nobody has
+thrown the dice in yet is let go free. The leaderboard is kept in `stats.txt` beside the
 saved game, and `--no-save` doesn't affect it.
 
 ### Saving
