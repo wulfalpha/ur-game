@@ -309,7 +309,7 @@ fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(row("Total", app.leaderboard.total(), Style::new().bold()));
     lines.push(Line::from(""));
     lines.push(
-        Line::from("Finished games against a computer player count.")
+        Line::from("Abandoned games count as losses.")
             .fg(DIM)
             .centered(),
     );

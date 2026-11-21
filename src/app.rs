@@ -766,7 +766,9 @@ impl App {
         let confirm = matches!(code, KeyCode::Enter | KeyCode::Char(' '));
         match &mut self.phase {
             Phase::GameOver(_) => {
-                if confirm || code == KeyCode::Char('n') {
+                // Not Space: it may be a late tap meant to hurry the
+                // computer, and would skip the chance to review or share.
+                if matches!(code, KeyCode::Enter | KeyCode::Char('n')) {
                     self.new_game(now);
                 } else if code == KeyCode::Char('v') {
                     self.start_review();
@@ -2079,7 +2081,10 @@ mod tests {
         app.handle_key(key(KeyCode::Esc), now);
         assert_eq!(app.log.len(), log_len + 1);
 
-        // A new game starts with a clean slate.
+        // A stray Space doesn't throw the finished game away…
+        app.handle_key(key(KeyCode::Char(' ')), now);
+        assert_eq!(app.phase, Phase::GameOver(winner));
+        // …but Enter starts a new one, with a clean slate.
         app.handle_key(key(KeyCode::Enter), now);
         assert!(app.decisions.is_empty() && app.review.is_none());
     }

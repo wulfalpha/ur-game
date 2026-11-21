@@ -25,6 +25,8 @@ use ur_game::game::{
 
 const CANVAS_W: f32 = 1280.0;
 const CANVAS_H: f32 = 720.0;
+/// Baseline of the key hints along the bottom, clear of the border.
+const FOOTER_Y: f32 = 688.0;
 
 const CELL: f32 = 96.0;
 const CELL_GAP: f32 = 8.0;
@@ -310,6 +312,25 @@ impl<'a> Ui<'a> {
         let mut lines = Vec::new();
         let mut line = String::new();
         for word in text.split_whitespace() {
+            // A word too long for a line on its own (a file path, say) is
+            // split wherever it has to be.
+            let mut word = word.to_string();
+            while self.text_width(&word, size, false) > width && word.chars().count() > 1 {
+                if !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                }
+                let mut n = word.chars().count() - 1;
+                while n > 1 {
+                    let head: String = word.chars().take(n).collect();
+                    if self.text_width(&head, size, false) <= width {
+                        break;
+                    }
+                    n -= 1;
+                }
+                lines.push(word.chars().take(n).collect());
+                word = word.chars().skip(n).collect();
+            }
+            let word = word.as_str();
             let candidate = if line.is_empty() {
                 word.to_string()
             } else {
@@ -1262,7 +1283,7 @@ impl Ui<'_> {
         );
         row("Total", app.leaderboard.total(), total_y, true);
         self.text(
-            "Finished games against a computer player count.",
+            "Abandoned games count as losses.",
             CANVAS_W / 2.0,
             y + h - 82.0,
             16.0,
@@ -1286,7 +1307,7 @@ impl Ui<'_> {
         if app.review.is_some() {
             let text =
                 "Left/Right: step · Tab: next slip · Up/Down: options · E: share · Esc: done";
-            self.text(text, 460.0, 706.0, 16.0, DIM, false, Align::Center);
+            self.text(text, 460.0, FOOTER_Y, 16.0, DIM, false, Align::Center);
             return;
         }
         let text = match &app.phase {
@@ -1301,7 +1322,7 @@ impl Ui<'_> {
             }
             Phase::NoMoves { .. } => "Space: continue · Esc: menu · ?: rules",
         };
-        self.text(text, 460.0, 706.0, 16.0, DIM, false, Align::Center);
+        self.text(text, 460.0, FOOTER_Y, 16.0, DIM, false, Align::Center);
     }
 
     fn sound_control(&self, app: &mut App, now: Time) {
@@ -1310,7 +1331,7 @@ impl Ui<'_> {
         } else {
             "Sound off".to_owned()
         };
-        let (x, y) = if app.screen == Screen::Menu {
+        let (x, y) = if app.screen != Screen::Game {
             (24.0, 656.0)
         } else {
             (PANEL_X, 16.0)
@@ -1318,7 +1339,7 @@ impl Ui<'_> {
         if self.button(&label, x, y, 140.0, 34.0, false) {
             press(app, Key::Char('m'), now);
         }
-        if app.screen == Screen::Menu {
+        if app.screen != Screen::Game {
             self.text(
                 "M: mute · +/-: volume",
                 24.0,
