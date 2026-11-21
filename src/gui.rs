@@ -10,6 +10,7 @@
 use crate::app::{
     App, Grade, MenuItem, MoveOption, Phase, Screen, Time, entry_player, risk_percent,
 };
+use crate::stats::{Outcome, Record};
 use macroquad::prelude::*;
 
 use ratatui::crossterm::event::{KeyCode as Key, KeyEvent, KeyModifiers};
@@ -1214,7 +1215,7 @@ impl Ui<'_> {
     }
 
     fn leaderboard(&self, app: &mut App, now: Time) {
-        let (w, h) = (700.0, 560.0);
+        let (w, h) = (1040.0, 540.0);
         let (x, y) = ((CANVAS_W - w) / 2.0, 80.0);
         self.panel(x, y, w, h, "");
         self.text(
@@ -1235,9 +1236,18 @@ impl Ui<'_> {
             false,
             Align::Center,
         );
-        // Column anchors: name on the left, numbers right-aligned.
-        let cols = [x + 290.0, x + 370.0, x + 450.0, x + 535.0];
-        let bar_x = x + 555.0;
+        // Column anchors: name on the left, numbers right-aligned, then the
+        // latest results as dots.
+        let cols = [
+            x + 290.0,
+            x + 370.0,
+            x + 450.0,
+            x + 540.0,
+            x + 640.0,
+            x + 720.0,
+            x + 810.0,
+        ];
+        let dots_x = x + 850.0;
         let header_y = y + 160.0;
         self.text(
             "Opponent",
@@ -1248,26 +1258,43 @@ impl Ui<'_> {
             true,
             Align::Left,
         );
-        for (label, cx) in ["Played", "Won", "Lost", "Win %"].iter().zip(cols) {
+        let labels = ["Played", "Won", "Lost", "Win %", "Streak", "Best", "Avg"];
+        for (label, cx) in labels.iter().zip(cols) {
             self.text(label, cx, header_y, 17.0, ACCENT, true, Align::Right);
         }
-        let row = |name: &str, r: crate::stats::Record, ry: f32, bold: bool| {
+        self.text("Last 10", dots_x, header_y, 17.0, ACCENT, true, Align::Left);
+        let dot = |cx: f32, cy: f32, outcome: Outcome| match outcome {
+            Outcome::Won => self.circle(vec2(cx, cy), 6.0, TARGET),
+            Outcome::Lost => self.circle(vec2(cx, cy), 6.0, DANGER),
+            Outcome::Abandoned => self.circle_lines(vec2(cx, cy), 5.0, 2.0, DANGER),
+        };
+        let row = |name: &str, r: Record, ry: f32, bold: bool| {
             self.text(name, x + 60.0, ry, 21.0, TEXT, bold, Align::Left);
+            let dash = || "–".to_string();
             let cells = match r.win_percent() {
                 Some(p) => [
                     r.played.to_string(),
                     r.won.to_string(),
                     r.lost().to_string(),
                     format!("{p}%"),
+                    r.best_streak.to_string(),
                 ],
-                None => ["0".into(), "–".into(), "–".into(), "–".into()],
+                None => ["0".into(), dash(), dash(), dash(), dash()],
             };
-            for (cell, cx) in cells.iter().zip(cols) {
+            let avg = r.average_throws().map_or_else(dash, |a| format!("{a:.0}"));
+            let (streak, streak_color) = match r.streak {
+                0 => (dash(), TEXT),
+                s if s > 0 => (format!("W{s}"), TARGET),
+                s => (format!("L{}", -s), DANGER),
+            };
+            for (cell, cx) in cells[..4].iter().zip(cols) {
                 self.text(cell, cx, ry, 21.0, TEXT, bold, Align::Right);
             }
-            self.rect(bar_x, ry - 13.0, 100.0, 12.0, rgb(24, 43, 63));
-            if let Some(p) = r.win_percent() {
-                self.rect(bar_x, ry - 13.0, p as f32, 12.0, ACCENT);
+            self.text(&streak, cols[4], ry, 21.0, streak_color, bold, Align::Right);
+            self.text(&cells[4], cols[5], ry, 21.0, TEXT, bold, Align::Right);
+            self.text(&avg, cols[6], ry, 21.0, TEXT, bold, Align::Right);
+            for (i, outcome) in r.recent().enumerate() {
+                dot(dots_x + 6.0 + i as f32 * 17.0, ry - 7.0, outcome);
             }
         };
         for (i, level) in ur_game::ai::Difficulty::ALL.into_iter().enumerate() {
@@ -1282,15 +1309,30 @@ impl Ui<'_> {
             with_alpha(ACCENT, 0.4),
         );
         row("Total", app.leaderboard.total(), total_y, true);
-        self.text(
-            "Abandoned games count as losses.",
-            CANVAS_W / 2.0,
-            y + h - 82.0,
-            16.0,
-            DIM,
-            false,
-            Align::Center,
-        );
+        // Legend: the dots, then what Avg means.
+        let legend_y = y + h - 82.0;
+        let parts: [(Option<Outcome>, &str); 4] = [
+            (Some(Outcome::Won), "won"),
+            (Some(Outcome::Lost), "lost"),
+            (Some(Outcome::Abandoned), "abandoned (counts as a loss)"),
+            (None, "·  Avg: throws in a finished game"),
+        ];
+        let width: f32 = parts
+            .iter()
+            .map(|(o, t)| {
+                self.text_width(t, 16.0, false) + if o.is_some() { 20.0 } else { 0.0 } + 18.0
+            })
+            .sum::<f32>()
+            - 18.0;
+        let mut lx = CANVAS_W / 2.0 - width / 2.0;
+        for (outcome, label) in parts {
+            if let Some(o) = outcome {
+                dot(lx + 6.0, legend_y - 5.0, o);
+                lx += 20.0;
+            }
+            self.text(label, lx, legend_y, 16.0, DIM, false, Align::Left);
+            lx += self.text_width(label, 16.0, false) + 18.0;
+        }
         if self.button(
             "Back",
             CANVAS_W / 2.0 - 80.0,

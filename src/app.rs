@@ -925,7 +925,7 @@ impl App {
         // so a losing game can't be dodged.
         let forfeit = self.forfeit_level();
         if let Some(level) = forfeit {
-            self.leaderboard.add(level, false);
+            self.leaderboard.add(level, stats::Outcome::Abandoned, None);
         }
         self.screen = Screen::Game;
         self.game = GameState::new();
@@ -1335,14 +1335,28 @@ impl App {
             [Controller::Computer(d), Controller::Human] => (Player::Dark, d),
             _ => return,
         };
-        self.leaderboard.add(level, winner == human);
+        let outcome = if winner == human {
+            stats::Outcome::Won
+        } else {
+            stats::Outcome::Lost
+        };
+        self.leaderboard.add(level, outcome, Some(n));
         let r = self.leaderboard.record(level);
-        self.push_log(format!(
+        let mut line = format!(
             "Your record against {level}: {} of {} won ({}%).",
             r.won,
             r.played,
             r.win_percent().unwrap_or(0)
-        ));
+        );
+        if r.streak >= 2 {
+            line += &format!(" {} wins in a row", r.streak);
+            line += if r.streak as u32 == r.best_streak {
+                ", your best yet!"
+            } else {
+                "!"
+            };
+        }
+        self.push_log(line);
         self.store_leaderboard();
     }
 
@@ -1931,6 +1945,7 @@ mod tests {
         );
         let record = app.leaderboard.record(Difficulty::Easy);
         assert_eq!(record.played, 1);
+        assert_eq!(record.average_throws(), Some(f64::from(throws)));
         assert_eq!(record.won, u32::from(winner == Player::Light));
         let expected = format!(
             "Your record against Easy: {} of 1 won ({}%).",

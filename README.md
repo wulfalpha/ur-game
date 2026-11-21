@@ -225,13 +225,29 @@ resumed game can still be reviewed at the end.
 ### Leaderboard
 
 **Leaderboard** in the menu shows how you've done against each computer
-level: games played, won and lost, and your win percentage. Every finished
-game between a human and a computer player counts, by the computer's
-level. Games between two humans or two computers don't count. Starting a
-new game over an unfinished one against the computer counts that game as a
-loss (the menu warns with "New game (forfeits saved)"); a game nobody has
-thrown the dice in yet is let go free. The leaderboard is kept in `stats.txt` beside the
-saved game, and `--no-save` doesn't affect it.
+level, and across them all:
+
+| Column  | Means                                                        |
+|---------|--------------------------------------------------------------|
+| Played, Won, Lost, Win % | Your games against that level              |
+| Streak  | Your current run: `W3` is three wins in a row, `L2` two losses |
+| Best    | Your longest winning streak                                  |
+| Avg     | How many throws a finished game takes, both players counted  |
+| Last 10 | Your latest results, oldest first: ● won, ● lost (red), ○ abandoned |
+
+The Total row's streak and latest results run across levels, in the order
+you played. When you win, the Chronicle also says how many wins in a row
+that makes, and whether it's your best yet.
+
+Every finished game between a human and a computer player counts, by the
+computer's level. Games between two humans or two computers don't count.
+Starting a new game over an unfinished one against the computer counts that
+game as a loss (the menu warns with "New game (forfeits saved)"); a game
+nobody has thrown the dice in yet is let go free. Abandoned games count
+toward streaks but not toward the average length. The leaderboard is kept
+in `stats.txt` beside the saved game, and `--no-save` doesn't affect it.
+Older leaderboards carry over, starting their streaks and history from
+the next game.
 
 ### Saving
 

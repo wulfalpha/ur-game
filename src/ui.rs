@@ -4,6 +4,7 @@ use crate::app::{
     App, Controller, Dice, Grade, MenuItem, Phase, Screen, describe_move, entry_player,
     risk_percent,
 };
+use crate::stats::{Outcome, Record};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -70,6 +71,7 @@ const DIM: Color = Color::Rgb(154, 163, 174);
 const BOARD_EDGE: Color = Color::Rgb(156, 126, 75); // lapis-and-shell boards had wooden frames
 const ROSETTE_COLOR: Color = Color::Rgb(132, 177, 235); // lapis lazuli
 const RISK_COLOR: Color = Color::Rgb(240, 150, 70); // amber
+const WIN_COLOR: Color = Color::LightGreen;
 
 // Tile backgrounds for the compact board.
 const TILE_A: Color = Color::Rgb(31, 49, 67);
@@ -251,15 +253,34 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// "██████░░░░" for a percentage.
-fn bar(percent: u32, width: usize) -> String {
-    let filled = (percent as usize * width + 50) / 100;
-    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+/// One latest result as a coloured dot.
+fn result_dot(outcome: Outcome) -> Span<'static> {
+    match outcome {
+        Outcome::Won => Span::styled("●", Style::new().fg(WIN_COLOR)),
+        Outcome::Lost => Span::styled("●", Style::new().fg(Color::LightRed)),
+        Outcome::Abandoned => Span::styled("○", Style::new().fg(Color::LightRed)),
+    }
+}
+
+/// "W3" for three wins in a row, "L2" for two losses.
+fn streak_span(streak: i32, width: usize) -> Span<'static> {
+    match streak {
+        0 => Span::raw(format!("{:>width$}", "–")),
+        s if s > 0 => Span::styled(
+            format!("{:>width$}", format!("W{s}")),
+            Style::new().fg(WIN_COLOR),
+        ),
+        s => Span::styled(
+            format!("{:>width$}", format!("L{}", -s)),
+            Style::new().fg(Color::LightRed),
+        ),
+    }
 }
 
 fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
     let box_area = area.centered(
-        Constraint::Length(56.min(area.width)),
-        Constraint::Length(13.min(area.height)),
+        Constraint::Length(61.min(area.width)),
+        Constraint::Length(12.min(area.height)),
     );
     let block = Block::bordered()
         .border_type(BorderType::Double)
@@ -271,30 +292,40 @@ fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
 
-    let row = |name: &str, r: crate::stats::Record, style: Style| {
-        let (won, lost, pct, meter) = match r.win_percent() {
+    let row = |name: &str, r: Record, bold: bool| {
+        let style = if bold {
+            Style::new().bold()
+        } else {
+            Style::new()
+        };
+        let dash = || "–".to_string();
+        let (won, lost, pct, best) = match r.win_percent() {
             Some(p) => (
                 r.won.to_string(),
                 r.lost().to_string(),
                 format!("{p}%"),
-                bar(p, 10),
+                r.best_streak.to_string(),
             ),
-            None => ("–".into(), "–".into(), "–".into(), String::new()),
+            None => (dash(), dash(), dash(), dash()),
         };
-        Line::from(vec![
+        let avg = r.average_throws().map_or_else(dash, |a| format!("{a:.0}"));
+        let mut spans = vec![
             Span::styled(
-                format!("{name:<9}{:>7}{won:>6}{lost:>6}{pct:>7}  ", r.played),
+                format!("{name:<7}{:>7}{won:>4}{lost:>5}{pct:>5}", r.played),
                 style,
             ),
-            Span::styled(meter, Style::new().fg(ACCENT)),
-        ])
+            streak_span(r.streak, 7),
+            Span::styled(format!("{best:>5}{avg:>5}  "), style),
+        ];
+        spans.extend(r.recent().map(result_dot));
+        Line::from(spans)
     };
     let mut lines = vec![
         Line::from("You against the computer").fg(DIM).centered(),
         Line::from(""),
         Line::from(format!(
-            "{:<9}{:>7}{:>6}{:>6}{:>7}",
-            "Opponent", "Played", "Won", "Lost", "Win %"
+            "{:<7}{:>7}{:>4}{:>5}{:>5}{:>7}{:>5}{:>5}  {}",
+            "Level", "Played", "Won", "Lost", "Win%", "Streak", "Best", "Avg", "Last 10"
         ))
         .fg(ACCENT)
         .bold(),
@@ -303,15 +334,22 @@ fn draw_leaderboard(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(row(
             &level.to_string(),
             app.leaderboard.record(level),
-            Style::new(),
+            false,
         ));
     }
-    lines.push(row("Total", app.leaderboard.total(), Style::new().bold()));
+    lines.push(row("Total", app.leaderboard.total(), true));
     lines.push(Line::from(""));
     lines.push(
-        Line::from("Abandoned games count as losses.")
-            .fg(DIM)
-            .centered(),
+        Line::from(vec![
+            result_dot(Outcome::Won),
+            Span::raw(" won  "),
+            result_dot(Outcome::Lost),
+            Span::raw(" lost  "),
+            result_dot(Outcome::Abandoned),
+            Span::raw(" abandoned (a loss) · Avg: throws a game"),
+        ])
+        .fg(DIM)
+        .centered(),
     );
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -911,7 +949,7 @@ fn short_move(mv: Move) -> String {
 /// Colour for a reviewed move's grade.
 fn grade_color(grade: Grade) -> Color {
     match grade {
-        Grade::Best | Grade::Good => Color::LightGreen,
+        Grade::Best | Grade::Good => WIN_COLOR,
         Grade::Inaccuracy => RISK_COLOR,
         Grade::Mistake => Color::LightRed,
     }
@@ -1260,17 +1298,37 @@ mod tests {
 
     #[test]
     fn leaderboard_screen_fits_and_shows_records() {
+        use crate::stats::Outcome::*;
         let mut app = App::new(0);
-        app.leaderboard.add(Difficulty::Easy, true);
-        app.leaderboard.add(Difficulty::Easy, false);
-        app.leaderboard.add(Difficulty::Easy, true);
+        app.leaderboard.add(Difficulty::Easy, Won, Some(40));
+        app.leaderboard.add(Difficulty::Easy, Lost, Some(50));
+        app.leaderboard.add(Difficulty::Easy, Won, Some(61));
+        app.leaderboard.add(Difficulty::Hard, Abandoned, None);
         app.screen = Screen::Leaderboard;
         for (w, h) in [(COMPACT_MIN_W, COMPACT_MIN_H), (MIN_W, MIN_H)] {
             let out = render(&app, w, h);
             assert!(out.contains("Leaderboard"), "{out}");
-            assert!(out.contains("Easy           3     2     1    67%"), "{out}");
-            assert!(out.contains("Medium         0     –     –      –"), "{out}");
-            assert!(out.contains("Total          3"), "{out}");
+            assert!(
+                out.contains("Level   Played Won Lost Win% Streak Best  Avg  Last 10"),
+                "{out}"
+            );
+            assert!(
+                out.contains("Easy         3   2    1  67%     W1    1   50  ●●●"),
+                "{out}"
+            );
+            assert!(
+                out.contains("Medium       0   –    –    –      –    –    –"),
+                "{out}"
+            );
+            assert!(
+                out.contains("Hard         1   0    1   0%     L1    0    –  ○"),
+                "{out}"
+            );
+            assert!(
+                out.contains("Total        4   2    2  50%     L1    1   50  ●●●○"),
+                "{out}"
+            );
+            assert!(out.contains("abandoned (a loss)"), "{out}");
             assert!(out.contains("Enter / Esc back"), "{out}");
         }
         // The menu still fits all seven rows on the smallest screen.
