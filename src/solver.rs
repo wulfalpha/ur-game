@@ -511,10 +511,15 @@ struct Block {
     len: u16,
 }
 
+// Leave room for the UI and other applications, even on large machines.
+fn worker_count(available: usize) -> usize {
+    available.saturating_sub(1).clamp(1, 4)
+}
+
 fn solve_pieces(rules: Rules, pieces: u8, progress: impl Fn(f64) + Sync) -> (Layout, Vec<u16>) {
     let layout = Layout::new(rules, pieces);
     let mut values = vec![0u16; layout.len as usize];
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let threads = worker_count(std::thread::available_parallelism().map_or(1, |n| n.get()));
     // Within a block, update positions further along first: the order
     // depends only on the block's piece counts, so work it out once each.
     let pbits = layout.private.len();
@@ -647,14 +652,15 @@ fn solve_pieces(rules: Rules, pieces: u8, progress: impl Fn(f64) + Sync) -> (Lay
 /// First line of a saved table.
 fn magic(rules: Rules) -> &'static [u8] {
     match rules {
-        Rules::Finkel => b"ur-game expert table 2 finkel\n",
-        Rules::Masters => b"ur-game expert table 2 masters\n",
+        Rules::Finkel => b"ur-game expert table 3 finkel\n",
+        Rules::Masters => b"ur-game expert table 3 masters\n",
     }
 }
 
 impl Table {
     /// Save the table: a short header, then each value as two
-    /// little-endian bytes. Written to a temporary file and renamed, so a
+    /// little-endian bytes, followed by a CRC32 checksum of the header and
+    /// values. Written to a temporary file and renamed, so a
     /// crash can't leave half a table behind.
     pub fn write_to(&self, path: &Path) -> io::Result<()> {
         write_values(path, magic(self.rules()), &self.values)
@@ -678,17 +684,21 @@ fn write_values(path: &Path, magic: &[u8], values: &[u16]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     let mut out = BufWriter::new(File::create(&tmp)?);
     out.write_all(magic)?;
+    let mut checksum = crc32fast::Hasher::new();
+    checksum.update(magic);
     for chunk in values.chunks(1 << 16) {
         let bytes: Vec<u8> = chunk.iter().flat_map(|v| v.to_le_bytes()).collect();
+        checksum.update(&bytes);
         out.write_all(&bytes)?;
     }
+    out.write_all(&checksum.finalize().to_le_bytes())?;
     out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
     fs::rename(tmp, path)
 }
 
 fn read_values(path: &Path, magic: &[u8], len: usize) -> io::Result<Vec<u16>> {
     let mut file = BufReader::new(File::open(path)?);
-    if file.get_ref().metadata()?.len() != (magic.len() + 2 * len) as u64 {
+    if file.get_ref().metadata()?.len() != (magic.len() + 2 * len + 4) as u64 {
         return Err(not_a_table());
     }
     let mut header = vec![0; magic.len()];
@@ -696,11 +706,14 @@ fn read_values(path: &Path, magic: &[u8], len: usize) -> io::Result<Vec<u16>> {
     if header != magic {
         return Err(not_a_table());
     }
+    let mut checksum = crc32fast::Hasher::new();
+    checksum.update(&header);
     let mut values = Vec::with_capacity(len);
     let mut buf = vec![0u8; 1 << 17];
     while values.len() < len {
         let n = (2 * (len - values.len())).min(buf.len());
         file.read_exact(&mut buf[..n])?;
+        checksum.update(&buf[..n]);
         values.extend(
             buf[..n]
                 .as_chunks::<2>()
@@ -708,6 +721,14 @@ fn read_values(path: &Path, magic: &[u8], len: usize) -> io::Result<Vec<u16>> {
                 .iter()
                 .map(|&b| u16::from_le_bytes(b)),
         );
+    }
+    let mut stored = [0u8; 4];
+    file.read_exact(&mut stored)?;
+    if u32::from_le_bytes(stored) != checksum.finalize() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expert table checksum mismatch",
+        ));
     }
     Ok(values)
 }
@@ -731,6 +752,13 @@ mod tests {
     use super::*;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+
+    #[test]
+    fn solver_workers_leave_cpu_headroom_and_have_a_cap() {
+        for (available, expected) in [(0, 1), (1, 1), (2, 1), (4, 3), (8, 4), (64, 4)] {
+            assert_eq!(worker_count(available), expected);
+        }
+    }
 
     #[test]
     fn the_full_games_have_the_known_number_of_positions() {
@@ -859,7 +887,13 @@ mod tests {
     /// The full solves take minutes, so they only run when asked for:
     /// `cargo test --release -- --ignored full_game`.
     fn full_game(rules: Rules) {
-        let table = solve(rules, |_| {});
+        let reported = AtomicU32::new(0);
+        let table = solve(rules, |fraction| {
+            let tenth = (fraction * 10.0) as u32;
+            if tenth > reported.fetch_max(tenth, Relaxed) {
+                println!("{rules}: {}% solved", tenth * 10);
+            }
+        });
         let layout = &table.layout;
         let get = |i: usize| f32::from(table.values[i]) / 65535.0;
         let mut worst = 0f32;
@@ -867,6 +901,7 @@ mod tests {
             let p = pos_of(&state);
             worst = worst.max((layout.update(p, &get) - get(layout.index(p))).abs());
         }
+        println!("{rules}: maximum sampled residual {worst:.8}");
         assert!(worst < 1e-4, "residual {worst}");
         let first = table.win_chance(&GameState::with_rules(rules));
         println!("{rules}: the first player wins {first:.4}");
@@ -893,13 +928,33 @@ mod tests {
         let magic = magic(Rules::Finkel);
         write_values(&path, magic, &values).unwrap();
         assert_eq!(read_values(&path, magic, values.len()).unwrap(), values);
+        let original = fs::read(&path).unwrap();
+        // Same-length corruption in either data chunk or checksum is refused.
+        for offset in [magic.len(), magic.len() + (1 << 17), original.len() - 1] {
+            let mut damaged = original.clone();
+            damaged[offset] ^= 1;
+            fs::write(&path, damaged).unwrap();
+            let error = read_values(&path, magic, values.len()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("checksum mismatch"));
+        }
+        fs::write(&path, &original).unwrap();
         // The other rules' header, a file of the wrong size, or a truncated
         // one, is refused.
         assert!(read_values(&path, self::magic(Rules::Masters), values.len()).is_err());
         assert!(read_values(&path, magic, values.len() + 1).is_err());
-        fs::write(&path, b"ur-game expert table 2 finkel\n\0\0").unwrap();
+        fs::write(&path, b"ur-game expert table 3 finkel\n\0\0").unwrap();
         assert!(read_values(&path, magic, values.len()).is_err());
         assert!(Table::read_from(&path, Rules::Finkel).is_err());
+        // Old tables cannot be verified, even if their payload is intact.
+        let mut legacy = b"ur-game expert table 2 finkel\n".to_vec();
+        legacy.extend(values.iter().flat_map(|v| v.to_le_bytes()));
+        fs::write(&path, &legacy).unwrap();
+        assert!(read_values(&path, magic, values.len()).is_err());
+        // Padding an old table to the new size still fails the version check.
+        legacy.extend([0u8; 4]);
+        fs::write(&path, legacy).unwrap();
+        assert!(read_values(&path, magic, values.len()).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 

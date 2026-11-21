@@ -264,12 +264,21 @@ pub struct ReviewStep {
     pub grade: Grade,
 }
 
+/// Practice hides the assessment until a retry is submitted or revealed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Practice {
+    Off,
+    Hidden,
+    Revealed(Option<usize>),
+}
+
 /// Stepping back through a finished game's decisions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Review {
     pub steps: Vec<ReviewStep>,
     /// The step on show.
     pub index: usize,
+    pub practice: Practice,
     /// The finished game, to return to afterwards.
     end: (GameState, Phase, Option<Dice>),
 }
@@ -365,6 +374,7 @@ pub struct App {
     pub review: Option<Review>,
     pub should_quit: bool,
     pub animations: bool,
+    pub show_paths: bool,
     pub sound_enabled: bool,
     pub sound_volume: f32,
     pub sound_cues: Vec<Cue>,
@@ -415,6 +425,7 @@ impl App {
             review: None,
             should_quit: false,
             animations: true,
+            show_paths: false,
             sound_enabled: true,
             sound_volume: 0.5,
             sound_cues: Vec::new(),
@@ -437,6 +448,7 @@ impl App {
         self.sound_enabled = saved.sound;
         self.sound_volume = saved.volume;
         self.animations = saved.animations;
+        self.show_paths = saved.show_paths;
         self.rules = saved.rules;
         self.leaderboard_rules = saved.rules;
         self.preferences = saved;
@@ -480,6 +492,26 @@ impl App {
         } else {
             self.rules
         }
+    }
+
+    pub fn paths_visible(&self) -> bool {
+        self.show_paths && self.game.rules() == Rules::Masters
+    }
+
+    /// Path number and direction towards the next square (or the exit).
+    pub fn route_marker(&self, player: Player, row: usize, col: usize) -> Option<(u8, char)> {
+        let rules = self.game.rules();
+        let pos = rules.path_position(player, row, col)?;
+        let (next_row, next_col) = rules
+            .cell_of(player, pos + 1)
+            .unwrap_or((if player == Player::Light { 0 } else { 2 }, 5));
+        let arrow = match (next_row.cmp(&row), next_col.cmp(&col)) {
+            (std::cmp::Ordering::Less, _) => '↑',
+            (std::cmp::Ordering::Greater, _) => '↓',
+            (_, std::cmp::Ordering::Less) => '←',
+            _ => '→',
+        };
+        Some((pos, arrow))
     }
 
     /// How a seat is shown in the menu: like [`Controller::label`], but an
@@ -660,6 +692,18 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Char('p' | 'P')
+                if self.screen == Screen::Game && self.game.rules() == Rules::Masters =>
+            {
+                self.show_paths = !self.show_paths;
+                self.preferences.show_paths = self.show_paths;
+                self.save_preferences();
+                return;
+            }
+            KeyCode::Char('t' | 'T') => {
+                self.expert.retry_saving();
+                return;
+            }
             KeyCode::Char('m') => {
                 self.sound_enabled = !self.sound_enabled;
                 self.preferences.sound = self.sound_enabled;
@@ -865,6 +909,8 @@ impl App {
                     self.new_game(now);
                 } else if code == KeyCode::Char('v') {
                     self.start_review();
+                } else if code == KeyCode::Char('x') && self.start_review() {
+                    self.toggle_review_practice();
                 }
             }
             // Space/Enter skips an animation, for anyone.
@@ -925,6 +971,9 @@ impl App {
 
     pub fn update(&mut self, now: Time) {
         self.now = now;
+        for notice in self.expert.take_notices() {
+            self.push_log(notice);
+        }
         let rules = self.active_rules();
         self.expert.load_if_saved(rules);
         if self
@@ -1166,7 +1215,10 @@ impl App {
             return;
         };
         if self.review.is_some() {
-            // Reviewing: a click only picks which option to read about.
+            if self.review_concealed() {
+                return self.reveal_review(Some(index));
+            }
+            // Outside a hidden practice attempt, clicks select an explanation.
             return self.select_option(index);
         }
         self.hint = None;
@@ -1296,6 +1348,7 @@ impl App {
         let review = Review {
             steps,
             index: 0,
+            practice: Practice::Off,
             end: (self.game, self.phase.clone(), self.dice),
         };
         // Sum each human's play up in the Chronicle, once per game.
@@ -1332,6 +1385,10 @@ impl App {
             return;
         };
         review.index = index.min(review.steps.len() - 1);
+        if review.practice != Practice::Off {
+            review.practice = Practice::Hidden;
+        }
+        let concealed = review.practice == Practice::Hidden;
         let step = review.step().clone();
         let d = step.decision;
         let roll = d.game.rules().roll_from_tips(d.tips.into());
@@ -1344,9 +1401,9 @@ impl App {
         self.phase = Phase::Choosing {
             roll,
             options: step.options,
-            selected: step.played,
+            selected: if concealed { 0 } else { step.played },
         };
-        self.hint = Some(step.hint);
+        self.hint = (!concealed).then_some(step.hint);
         self.deadline = None;
         // Bring the throw's Chronicle entry to the bottom of the view.
         let entry = format!("{}. ", d.throw);
@@ -1387,12 +1444,100 @@ impl App {
 
     /// The move played at the review step on show.
     pub fn review_played(&self) -> Option<usize> {
-        self.review.as_ref().map(|r| r.step().played)
+        self.review
+            .as_ref()
+            .filter(|_| !self.review_concealed())
+            .map(|r| r.step().played)
+    }
+
+    pub fn review_practicing(&self) -> bool {
+        self.review
+            .as_ref()
+            .is_some_and(|r| r.practice != Practice::Off)
+    }
+
+    pub fn review_concealed(&self) -> bool {
+        self.review
+            .as_ref()
+            .is_some_and(|r| r.practice == Practice::Hidden)
+    }
+
+    pub fn review_attempt(&self) -> Option<usize> {
+        match self.review.as_ref()?.practice {
+            Practice::Revealed(attempt) => attempt,
+            _ => None,
+        }
+    }
+
+    pub fn review_grade(&self) -> Option<Grade> {
+        let review = self.review.as_ref()?;
+        (!self.review_concealed()).then(|| {
+            Grade::of(
+                self.review_attempt().unwrap_or(review.step().played),
+                &review.step().hint,
+            )
+        })
+    }
+
+    pub fn toggle_review_practice(&mut self) {
+        let Some(review) = &mut self.review else {
+            return;
+        };
+        review.practice = if review.practice == Practice::Off {
+            Practice::Hidden
+        } else {
+            Practice::Off
+        };
+        let index = review.index;
+        self.show_review_step(index);
+    }
+
+    /// Jump to the largest loss, keeping the earliest choice in a tie.
+    pub fn review_biggest_mistake(&mut self) {
+        let Some(review) = &self.review else {
+            return;
+        };
+        let index = (0..review.steps.len()).fold(0, |best, i| {
+            let loss = |j: usize| review.steps[j].hint.loss[review.steps[j].played];
+            if loss(i) > loss(best) { i } else { best }
+        });
+        self.show_review_step(index);
+    }
+
+    /// Assess a retry without applying it to the match or changing its history.
+    fn reveal_review(&mut self, attempt: Option<usize>) {
+        let Some(review) = &mut self.review else {
+            return;
+        };
+        if review.practice != Practice::Hidden {
+            return;
+        }
+        if attempt.is_some_and(|i| i >= review.step().options.len()) {
+            return;
+        }
+        review.practice = Practice::Revealed(attempt);
+        self.hint = Some(review.step().hint.clone());
+        if let Some(i) = attempt
+            && let Phase::Choosing { selected, .. } = &mut self.phase
+        {
+            *selected = i;
+        }
     }
 
     fn review_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc | KeyCode::Char('v') => self.leave_review(),
+            KeyCode::Char('b') => self.review_biggest_mistake(),
+            KeyCode::Char('x') => self.toggle_review_practice(),
+            KeyCode::Char('h') if self.review_concealed() => self.reveal_review(None),
+            KeyCode::Enter | KeyCode::Char(' ') if self.review_concealed() => {
+                if let Phase::Choosing { selected, .. } = self.phase {
+                    self.reveal_review(Some(selected));
+                }
+            }
+            KeyCode::Char(c @ '1'..='9') if self.review_concealed() => {
+                self.reveal_review(Some(c as usize - '1' as usize));
+            }
             KeyCode::Left | KeyCode::Char('p') => self.review_step_by(-1, false),
             KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => self.review_step_by(1, false),
             KeyCode::Tab => self.review_step_by(1, true),
@@ -1813,6 +1958,44 @@ mod tests {
         let grades: Vec<Grade> = (0..6).map(|i| Grade::of(i, &points)).collect();
         assert_eq!(grades, [Best, Best, Good, Inaccuracy, Inaccuracy, Mistake]);
         assert_eq!(points.loss_label(3), "−1.9");
+    }
+
+    #[test]
+    fn path_overlay_tracks_crossing_routes_without_changing_the_game() {
+        let mut app = App::new(1);
+        app.rules = Rules::Masters;
+        app.new_game(Time::ZERO);
+        app.show_help = false;
+        let before = app.game;
+        app.handle_key(KeyEvent::from(KeyCode::Char('p')), Time::ZERO);
+        assert!(app.paths_visible());
+        assert_eq!(app.game, before);
+        assert_eq!(app.route_marker(Player::Light, 2, 6), Some((12, '→')));
+        assert_eq!(app.route_marker(Player::Dark, 2, 6), Some((16, '←')));
+        assert_eq!(app.route_marker(Player::Light, 1, 6), Some((11, '↓')));
+        assert_eq!(app.route_marker(Player::Dark, 1, 6), Some((11, '↑')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('p')), Time::ZERO);
+        assert!(!app.paths_visible());
+        app.show_paths = true;
+        app.game = GameState::new();
+        assert!(!app.paths_visible());
+    }
+
+    #[test]
+    fn queued_expert_waits_but_cache_writes_do_not_block_play() {
+        use crate::expert::Status;
+        let controller = Controller::Computer(Difficulty::Expert);
+        let (mut app, now) = game_app(controller, Controller::Human);
+        app.expert = Expert::pretend(Status::Queued);
+        assert_eq!(app.controller_label(controller), "Expert · queued");
+        assert!(app.waiting_for_expert());
+        app.update(now + Time::from_secs(1));
+        assert_eq!(app.phase, Phase::AwaitRoll);
+        assert_eq!(app.throw_number(), 0);
+        for status in [Status::ReadyUnsaved("disk full".into()), Status::Saving] {
+            app.expert = Expert::pretend(status);
+            assert!(!app.waiting_for_expert());
+        }
     }
 
     #[test]
@@ -2237,6 +2420,136 @@ mod tests {
         friends.handle_key(key(KeyCode::Enter), now);
         friends.update(now + PASS_DELAY);
         assert_eq!(friends.forfeit_level(), None);
+    }
+
+    fn practice_fixture() -> App {
+        let mut app = App::new(42);
+        let position = GameState::from_positions_in(
+            Rules::Finkel,
+            Player::Light,
+            [0, 0, 0, 0, 0, 1, 3],
+            [0; 7],
+        )
+        .unwrap();
+        let options = move_options(&position, 1);
+        assert_eq!(options.len(), 2);
+        app.game =
+            GameState::from_positions_in(Rules::Finkel, Player::Dark, [15; 7], [0; 7]).unwrap();
+        app.phase = Phase::GameOver(Player::Light);
+        let steps = [3.0, 8.0, 8.0]
+            .into_iter()
+            .enumerate()
+            .map(|(i, loss)| ReviewStep {
+                decision: Decision {
+                    throw: i as u32 + 1,
+                    game: position,
+                    tips: 1,
+                    mv: options[1].mv,
+                },
+                options: options.clone(),
+                played: 1,
+                hint: Hint {
+                    best: 0,
+                    loss: vec![0.0, loss],
+                    exact: false,
+                    reasons: vec!["best explanation".into(), "retry explanation".into()],
+                },
+                grade: Grade::Mistake,
+            })
+            .collect();
+        app.review = Some(Review {
+            steps,
+            index: 0,
+            practice: Practice::Off,
+            end: (app.game, app.phase.clone(), app.dice),
+        });
+        app.screen = Screen::Game;
+        app.show_help = false;
+        app.show_review_step(0);
+        app
+    }
+
+    #[test]
+    fn biggest_mistake_uses_loss_and_keeps_the_earliest_tie() {
+        let mut app = practice_fixture();
+        app.toggle_review_practice();
+        app.handle_key(key(KeyCode::Char('b')), Time::ZERO);
+        assert_eq!(app.review.as_ref().unwrap().index, 1);
+        assert!(app.review_concealed());
+        assert!(app.hint.is_none());
+    }
+
+    #[test]
+    fn practice_hides_then_grades_a_retry_without_changing_the_recorded_game() {
+        let mut app = practice_fixture();
+        let end = app.review.as_ref().unwrap().end.clone();
+        let original_steps = app.review.as_ref().unwrap().steps.clone();
+        let history = (
+            app.decisions.clone(),
+            app.log.clone(),
+            app.tally,
+            app.leaderboard,
+            app.resumable.clone(),
+        );
+        app.handle_key(key(KeyCode::Char('x')), Time::ZERO);
+        assert!(app.review_concealed());
+        assert_eq!(app.review_played(), None);
+        assert_eq!(app.review_grade(), None);
+        assert!(app.hint.is_none() && app.hint_reason().is_none());
+        assert!(matches!(app.phase, Phase::Choosing { selected: 0, .. }));
+        let position = app.game;
+        app.handle_key(key(KeyCode::Char('9')), Time::ZERO);
+        assert!(app.review_concealed()); // invalid option must not reveal
+        app.handle_key(key(KeyCode::Down), Time::ZERO);
+        app.handle_key(key(KeyCode::Enter), Time::ZERO);
+        assert_eq!(app.review_attempt(), Some(1));
+        assert_eq!(app.review_grade(), Some(Grade::Mistake));
+        assert_eq!(app.game, position);
+        assert_eq!(app.review.as_ref().unwrap().index, 0);
+        assert!(app.hint.is_some());
+        app.handle_key(key(KeyCode::Right), Time::ZERO);
+        assert_eq!(app.review.as_ref().unwrap().index, 1);
+        assert!(app.review_concealed() && app.hint.is_none());
+        assert_eq!(app.review_attempt(), None);
+        app.handle_key(key(KeyCode::Char('h')), Time::ZERO);
+        assert!(!app.review_concealed());
+        assert_eq!(app.review_attempt(), None);
+        assert_eq!(app.review_played(), Some(1));
+        assert_eq!(app.review.as_ref().unwrap().steps, original_steps);
+        assert_eq!(
+            (
+                app.decisions.clone(),
+                app.log.clone(),
+                app.tally,
+                app.leaderboard,
+                app.resumable.clone()
+            ),
+            history
+        );
+        app.handle_key(key(KeyCode::Esc), Time::ZERO);
+        assert_eq!((app.game, app.phase, app.dice), end);
+    }
+
+    #[test]
+    fn clicking_or_numbering_a_practice_option_grades_it_without_applying_it() {
+        for click in [false, true] {
+            let mut app = practice_fixture();
+            app.toggle_review_practice();
+            let before = app.game;
+            if click {
+                app.play_option(0, Time::ZERO);
+            } else {
+                app.handle_key(key(KeyCode::Char('1')), Time::ZERO);
+            }
+            assert_eq!(app.review_attempt(), Some(0));
+            assert_eq!(app.review_grade(), Some(Grade::Best));
+            assert_eq!(app.game, before);
+            assert_eq!(app.review_played(), Some(1));
+            app.toggle_review_practice();
+            assert!(!app.review_practicing());
+            assert_eq!(app.review_attempt(), None);
+            assert!(matches!(app.phase, Phase::Choosing { selected: 1, .. }));
+        }
     }
 
     #[test]

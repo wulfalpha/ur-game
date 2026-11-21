@@ -10,6 +10,7 @@ pub struct Preferences {
     pub sound: bool,
     pub volume: f32,
     pub animations: bool,
+    pub show_paths: bool,
     /// The rules new games are played by.
     pub rules: Rules,
 }
@@ -20,6 +21,7 @@ impl Default for Preferences {
             sound: true,
             volume: 0.5,
             animations: true,
+            show_paths: false,
             rules: Rules::Finkel,
         }
     }
@@ -34,6 +36,7 @@ impl Preferences {
         let mut sound = None;
         let mut volume = None;
         let mut animations = None;
+        let mut show_paths = false;
         // Files from before Masters had no rules line.
         let mut rules = Rules::Finkel;
         for line in lines {
@@ -48,6 +51,7 @@ impl Preferences {
                     volume = Some(v);
                 }
                 "animations" => animations = Some(value.parse().ok()?),
+                "show-paths" => show_paths = value.parse().ok()?,
                 "rules" => {
                     rules = Rules::ALL
                         .into_iter()
@@ -60,16 +64,18 @@ impl Preferences {
             sound: sound?,
             volume: volume?,
             animations: animations?,
+            show_paths,
             rules,
         })
     }
 
     fn text(self) -> String {
         format!(
-            "{HEADER}\nsound {}\nvolume {}\nanimations {}\nrules {}\n",
+            "{HEADER}\nsound {}\nvolume {}\nanimations {}\nshow-paths {}\nrules {}\n",
             self.sound,
             self.volume,
             self.animations,
+            self.show_paths,
             self.rules.to_string().to_lowercase()
         )
     }
@@ -130,9 +136,13 @@ mod tests {
         app.menu_selected = MenuItem::Animation;
         app.handle_key(KeyEvent::from(KeyCode::Right), Time::ZERO);
         app.handle_key(KeyEvent::from(KeyCode::Right), Time::ZERO);
+        app.screen = crate::app::Screen::Game;
+        app.game = ur_game::game::GameState::with_rules(Rules::Masters);
+        app.handle_key(KeyEvent::from(KeyCode::Char('p')), Time::ZERO);
         let mut reopened = App::new(10);
         reopened.use_preferences(path.clone());
         assert!(!reopened.sound_enabled && !reopened.animations);
+        assert!(reopened.show_paths);
         assert!((reopened.sound_volume - 0.4).abs() < 0.001);
 
         fs::write(&path, "broken preferences").unwrap();
@@ -146,9 +156,12 @@ mod tests {
             sound: false,
             volume: 0.3,
             animations: false,
+            show_paths: true,
             rules: Rules::Masters,
         };
         assert_eq!(Preferences::parse(&settings.text()), Some(settings));
+        let without_paths = settings.text().replace("show-paths true\n", "");
+        assert!(!Preferences::parse(&without_paths).unwrap().show_paths);
         // Files from before Masters still load, as Finkel.
         let old = settings.text().replace("rules masters\n", "");
         assert_eq!(

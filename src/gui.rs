@@ -696,6 +696,9 @@ impl Ui<'_> {
     fn game(&self, app: &mut App, now: Time) {
         self.status(app);
         self.board(app);
+        if app.paths_visible() {
+            self.path_overlay(app);
+        }
         for player in Player::ALL {
             self.reserve(app, player);
         }
@@ -706,6 +709,25 @@ impl Ui<'_> {
         self.log(app, now);
         self.footer(app);
         self.top_buttons(app, now);
+        if app.review.is_some() {
+            if self.button("Biggest mistake (B)", 230.0, 630.0, 220.0, 32.0, false) {
+                app.review_biggest_mistake();
+            }
+            if self.button(
+                if app.review_practicing() {
+                    "Exit practice (X)"
+                } else {
+                    "Practice (X)"
+                },
+                470.0,
+                630.0,
+                220.0,
+                32.0,
+                false,
+            ) {
+                app.toggle_review_practice();
+            }
+        }
         if let Phase::GameOver(winner) = app.phase {
             self.game_over(app, winner, now);
         }
@@ -715,18 +737,40 @@ impl Ui<'_> {
         let turn = app.game.turn();
         if let Some(review) = &app.review {
             let step = review.step();
-            let (grade, color) = match step.grade {
+            if app.review_concealed() {
+                self.text(
+                    &format!(
+                        "Practice {}/{} · {turn}: choose a move",
+                        review.index + 1,
+                        review.steps.len()
+                    ),
+                    460.0,
+                    44.0,
+                    24.0,
+                    ACCENT,
+                    true,
+                    Align::Center,
+                );
+                return;
+            }
+            let evaluated = app.review_attempt().unwrap_or(step.played);
+            let (grade, color) = match app.review_grade().expect("revealed review") {
                 Grade::Best => ("best move".to_string(), ACCENT),
                 g => (
-                    format!("{} ({})", g.label(), step.hint.loss_label(step.played)),
+                    format!("{} ({})", g.label(), step.hint.loss_label(evaluated)),
                     grade_color(g),
                 ),
             };
             let roll = app.dice.map_or(0, |d| d.value);
             let head = format!(
-                "Review {}/{} · {turn} threw {roll}: ",
+                "Review {}/{} · {turn} threw {roll}{}: ",
                 review.index + 1,
-                review.steps.len()
+                review.steps.len(),
+                if app.review_attempt().is_some() {
+                    " · retry"
+                } else {
+                    ""
+                }
             );
             let full = self.text_width(&head, 24.0, true) + self.text_width(&grade, 24.0, true);
             let x = 460.0 - full / 2.0;
@@ -864,6 +908,51 @@ impl Ui<'_> {
                 let (x, y) = cell_rect(r, c);
                 let color = if opt.outcome.captured { DANGER } else { TARGET };
                 self.rect_lines(x + 2.0, y + 2.0, CELL - 4.0, CELL - 4.0, 5.0, color);
+            }
+        }
+    }
+
+    fn path_overlay(&self, app: &App) {
+        let rules = app.game.rules();
+        for player in Player::ALL {
+            let color = player_text_color(player);
+            // Separate parallel routes and keep their numbers clear of pieces.
+            let offset = match player {
+                Player::Light => vec2(-12.0, -40.0),
+                Player::Dark => vec2(12.0, 40.0),
+            };
+            let point = |pos| path_point(rules, player, pos) + offset;
+            for pos in START..rules.finish() {
+                let (a, b) = (point(pos), point(pos + 1));
+                self.line(a, b, 6.0, PANEL);
+                self.line(a, b, 3.0, color);
+                let dir = (b - a).normalize();
+                let tip = a.lerp(b, 0.65);
+                let wing = vec2(-dir.y, dir.x) * 5.0;
+                self.triangle(
+                    tip + dir * 6.0,
+                    tip - dir * 6.0 + wing,
+                    tip - dir * 6.0 - wing,
+                    color,
+                );
+            }
+            for pos in 1..=rules.path_len() {
+                let c = point(pos);
+                self.rect(c.x - 12.0, c.y - 9.0, 24.0, 18.0, PANEL);
+                self.text(
+                    &pos.to_string(),
+                    c.x,
+                    c.y + 5.0,
+                    13.0,
+                    color,
+                    true,
+                    Align::Center,
+                );
+            }
+            for (pos, label) in [(START, "IN"), (rules.finish(), "OUT")] {
+                let c = point(pos);
+                self.rect(c.x - 20.0, c.y - 10.0, 40.0, 20.0, PANEL);
+                self.text(label, c.x, c.y + 5.0, 13.0, color, true, Align::Center);
             }
         }
     }
@@ -1165,7 +1254,7 @@ impl Ui<'_> {
         if human {
             let hint_y = y + MOVES_H - 38.0;
             // In a review the reasons are always on, so no Hint button.
-            let why_x = if played.is_some() {
+            let why_x = if app.review.is_some() {
                 x + 14.0
             } else {
                 if self.button("Hint (H)", x + 14.0, hint_y, 120.0, 28.0, false) {
@@ -1173,6 +1262,11 @@ impl Ui<'_> {
                 }
                 x + 146.0
             };
+            if app.review_concealed()
+                && self.button("Reveal (H)", x + 14.0, hint_y, 120.0, 28.0, false)
+            {
+                press(app, Key::Char('h'), now);
+            }
             if let Some((is_best, why)) = app.hint_reason() {
                 // Gold for the recommended move, which its row also tags "best".
                 let color = if is_best { ACCENT } else { TEXT };
@@ -1192,6 +1286,27 @@ impl Ui<'_> {
             "Chronicle".to_string()
         };
         self.panel(x, y, PANEL_W, LOG_H, &title);
+        if app.review_concealed() {
+            self.text(
+                "Chronicle hidden until you try",
+                x + 14.0,
+                y + 64.0,
+                16.0,
+                DIM,
+                false,
+                Align::Left,
+            );
+            self.text(
+                "a move or reveal the answer.",
+                x + 14.0,
+                y + 88.0,
+                16.0,
+                DIM,
+                false,
+                Align::Left,
+            );
+            return;
+        }
         if self.button("Share (E)", x + PANEL_W - 112.0, y + 9.0, 98.0, 26.0, false) {
             press(app, Key::Char('e'), now);
         }
@@ -1388,13 +1503,16 @@ impl Ui<'_> {
 
     fn footer(&self, app: &App) {
         if app.review.is_some() {
-            let text =
-                "Left/Right: step · Tab: next slip · Up/Down: options · E: share · Esc: done";
+            let text = if app.review_concealed() {
+                "Up/Down: choose · Enter/1-9: try · H: reveal · Left/Right: step · X: exit practice"
+            } else {
+                "Left/Right: step · Up/Down: options · B: biggest mistake · X: practice · Esc: done"
+            };
             self.text(text, 460.0, FOOTER_Y, 16.0, DIM, false, Align::Center);
             return;
         }
         let text = match &app.phase {
-            Phase::GameOver(_) => "Enter: rematch · V: review your moves · E: share · Esc: menu",
+            Phase::GameOver(_) => "Enter: rematch · V: review · X: practice · E: share · Esc: menu",
             Phase::Rolling { .. } | Phase::Moving { .. } => {
                 "Space: skip animation · Esc: menu · ?: rules"
             }
@@ -1436,6 +1554,22 @@ impl Ui<'_> {
     }
 
     fn top_buttons(&self, app: &mut App, now: Time) {
+        if app.game.rules() == Rules::Masters
+            && self.button(
+                if app.show_paths {
+                    "Paths on (P)"
+                } else {
+                    "Paths (P)"
+                },
+                144.0,
+                16.0,
+                142.0,
+                34.0,
+                app.show_paths,
+            )
+        {
+            press(app, Key::Char('p'), now);
+        }
         if self.button("Menu", BOARD_X - 8.0, 16.0, 90.0, 34.0, false) {
             press(app, Key::Esc, now);
         }
@@ -1445,7 +1579,14 @@ impl Ui<'_> {
     }
 
     fn game_over(&self, app: &mut App, winner: Player, now: Time) {
-        let (w, h) = (520.0, 150.0);
+        let (w, h) = (
+            520.0,
+            if app.decisions.is_empty() {
+                150.0
+            } else {
+                190.0
+            },
+        );
         let x = BOARD_X + (BOARD_W - w) / 2.0;
         let y = BOARD_Y + (BOARD_H - h) / 2.0;
         self.rect(x, y, w, h, with_alpha(PANEL, 0.95));
@@ -1466,6 +1607,18 @@ impl Ui<'_> {
             && self.button("Review (V)", x + 190.0, y + 90.0, 140.0, 40.0, false)
         {
             press(app, Key::Char('v'), now);
+        }
+        if !app.decisions.is_empty()
+            && self.button(
+                "Practice (X)",
+                x + (w - 180.0) / 2.0,
+                y + 142.0,
+                180.0,
+                32.0,
+                false,
+            )
+        {
+            press(app, Key::Char('x'), now);
         }
         if self.button("Menu", x + w - 170.0, y + 90.0, 140.0, 40.0, false) {
             press(app, Key::Esc, now);

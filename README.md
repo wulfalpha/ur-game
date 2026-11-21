@@ -120,6 +120,13 @@ cross at the far end, the numbers on those five squares change with whose
 turn it is, to match the move list. Press **?** in a game for the rules in
 play.
 
+Press **P** during a Masters game to show or hide the routes; the window also
+has a **Paths** button. Both routes have arrows, numbered steps, and **IN/OUT**
+markers, in each player's colour. On the full terminal board, Light's labels
+are above each tile and Dark's below. The compact terminal board shows only
+the current player's route to leave room for pieces. This preference is
+remembered, and also works while reviewing a game.
+
 ## Playing
 
 You need [Rust](https://www.rust-lang.org/tools/install).
@@ -159,7 +166,21 @@ far along it is, and you can start a game straight away: the Expert waits
 for the table before its first throw. The result is saved (276 MB for
 Finkel, 1 GB for Masters, beside the saved game), so after that it is ready
 in a moment. Once it's saved, it also makes hints and game
-reviews exact, whoever you're playing.
+reviews exact, whoever you're playing. Preparation is queued: only one
+Expert table is loaded, solved, or saved at a time. Solving uses at most four
+workers and leaves one CPU free where possible. Switching rules keeps the
+current preparation running and queues the other table. Preparation times
+vary with the CPU and worker limit.
+
+If a table cannot be saved, Expert remains ready for this session. Its menu
+label says **not saved**, and the Chronicle explains the error. Press **T**
+to retry saving from memory without solving again. Until saving succeeds,
+the table will need to be prepared again next launch.
+
+Expert caches include a CRC32 checksum, checked before their values are used.
+Corrupt caches and older caches without a checksum are rejected; the Chronicle
+explains why. Choose Expert to rebuild an old or damaged cache once. Hints and
+reviews use Hard until a verified or newly solved table is ready.
 
 | Key           | What it does                              |
 |---------------|-------------------------------------------|
@@ -174,6 +195,8 @@ reviews exact, whoever you're playing.
 | e             | Share the Chronicle (file + clipboard)    |
 | PgUp/PgDn, [ ] | Scroll the Chronicle back and forward    |
 | End           | Jump back to the newest Chronicle entry   |
+| p             | Show / hide Masters routes                |
+| t             | Retry saving Expert tables after a cache error          |
 | m             | Toggle sound                              |
 | + / -         | Raise / lower sound volume                |
 | ? / F1        | Show the rules                            |
@@ -260,7 +283,16 @@ The two scales are set so they grade about the same share of a beginner's
 moves as slips. ← and → step through the
 game, Tab and Shift+Tab jump to the next or previous inaccuracy or
 mistake, ↑ and ↓ read the reasons for the other options, and Esc goes back
-to the finished game. The Chronicle follows along, and gets a one-line
+to the finished game. Press **B** to jump to the choice with the largest
+evaluated loss (the earliest if tied). Press **X** to enter practice mode
+(or press **X** on the finished game to start without revealing answers):
+choose with ↑/↓, then submit with Enter, 1–9, or a click. The recommendation,
+original move, grade, and Chronicle stay hidden until you try a move or press
+**H** to reveal. Your retry is graded and explained without changing the
+recorded game, results, or saved match. Practice stays on as you navigate;
+press **X** again to return to ordinary review. The window also has buttons
+for the biggest mistake and practice. The Chronicle follows along, and gets
+a one-line
 summary such as "Review of Light's 24 choices: 15 best, 5 good, 3
 inaccuracies, 1 mistake." Your choices are saved with the game, so a
 resumed game can still be reviewed at the end.
@@ -427,6 +459,13 @@ exactly alike.
 Run the tests with `cargo test`. Checking the full solves takes a while
 (Finkel a few minutes, Masters longer), so they only run when asked:
 `cargo test --release -- --ignored full_game`.
+
+The **Full Expert solver verification** GitHub Actions workflow is manually
+triggered from the Actions tab. Choose Finkel, Masters, or both; it runs the
+ignored full solves in release mode, checks sampled equation residuals, and
+prints the first-player win chances. The two solves run sequentially when
+both are selected, with a 90-minute job limit. It is separate from normal
+push and pull-request CI.
 
 ## License
 

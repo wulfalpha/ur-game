@@ -1,0 +1,49 @@
+name: Full Expert solver verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      rules:
+        description: Rules to solve and verify (may take tens of minutes)
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - finkel
+          - masters
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  full-solver:
+    name: Solve and verify (${{ inputs.rules }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Solve and check residuals
+        env:
+          RULES: ${{ inputs.rules }}
+        run: |
+          case "$RULES" in
+            both)
+              cargo test --locked --release --lib -- --ignored full_game --nocapture --test-threads=1
+              ;;
+            finkel|masters)
+              cargo test --locked --release --lib "solver::tests::full_game_$RULES" -- --ignored --exact --nocapture
+              ;;
+            *)
+              echo "Unknown rules: $RULES" >&2
+              exit 1
+              ;;
+          esac

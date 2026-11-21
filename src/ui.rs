@@ -470,10 +470,21 @@ fn status_line(app: &App) -> Line<'static> {
     let turn = app.game.turn();
     if let Some(review) = &app.review {
         let step = review.step();
-        let grade = match step.grade {
+        if app.review_concealed() {
+            return Line::from(format!(
+                "Practice {}/{} · {turn} threw {} · choose a move",
+                review.index + 1,
+                review.steps.len(),
+                app.dice.map_or(0, |d| d.value)
+            ))
+            .fg(ACCENT)
+            .centered();
+        }
+        let evaluated = app.review_attempt().unwrap_or(step.played);
+        let grade = match app.review_grade().expect("revealed review") {
             Grade::Best => Span::styled("best move", Style::new().fg(ACCENT).bold()),
             g => Span::styled(
-                format!("{} {}", g.label(), step.hint.loss_label(step.played)),
+                format!("{} {}", g.label(), step.hint.loss_label(evaluated)),
                 Style::new().fg(grade_color(g)).bold(),
             ),
         };
@@ -488,8 +499,13 @@ fn status_line(app: &App) -> Line<'static> {
                 Style::new().fg(player_color(turn)).bold(),
             ),
             Span::raw(format!(
-                " threw {}, played: ",
-                app.dice.map_or(0, |d| d.value)
+                " threw {}, {}: ",
+                app.dice.map_or(0, |d| d.value),
+                if app.review_attempt().is_some() {
+                    "retry"
+                } else {
+                    "played"
+                }
             )),
             grade,
         ])
@@ -525,14 +541,24 @@ fn status_line(app: &App) -> Line<'static> {
 }
 
 fn footer_hint(app: &App) -> &'static str {
+    if app.review_concealed() {
+        return "↑↓ choose · Enter/1-9 try · h reveal · ←→ step · x exit practice";
+    }
     if app.review.is_some() {
-        return "←→ step · Tab next slip · ↑↓ options · e share · Esc done";
+        return "←→ step · ↑↓ options · b biggest · x practice · Esc done";
+    }
+    if app.paths_visible() {
+        return if app.game.turn() == Player::Light {
+            "Paths: Light above, Dark below; compact: Light · P hide · ? help"
+        } else {
+            "Paths: Light above, Dark below; compact: Dark · P hide · ? help"
+        };
     }
     match &app.phase {
-        Phase::GameOver(_) => "Enter rematch · v review · e share · [ ] scroll · Esc menu",
+        Phase::GameOver(_) => "Enter rematch · v review · x practice · e share · Esc menu",
         Phase::Rolling { .. } | Phase::Moving { .. } => "Space skip · Esc menu · ? rules · q quit",
         _ if !app.current_is_human() => "Space hurry · Esc menu · ? rules · q quit",
-        Phase::AwaitRoll => "Space roll · e share · [ ] scroll · M sound · Esc menu · ? rules",
+        Phase::AwaitRoll => "Space roll · P paths · e share · Esc menu · ? rules",
         Phase::Choosing { .. } => "←→ select · Enter play · 1-9 pick · h hint · ? rules · Esc menu",
         Phase::NoMoves { .. } => "Space continue · Esc menu · ? rules",
     }
@@ -710,6 +736,30 @@ fn content_line(content: Content) -> Line<'static> {
     }
 }
 
+fn draw_path_gate(app: &App, row: usize, col: usize, rect: Rect, buf: &mut Buffer) {
+    if !app.paths_visible() || row == 1 || !(4..=5).contains(&col) {
+        return;
+    }
+    let player = if row == 0 {
+        Player::Light
+    } else {
+        Player::Dark
+    };
+    let label = if col == 4 { "IN←" } else { "←OUT" };
+    Paragraph::new(label)
+        .fg(player_color(player))
+        .bold()
+        .centered()
+        .render(
+            Rect {
+                y: rect.y + rect.height / 2,
+                height: 1,
+                ..rect
+            },
+            buf,
+        );
+}
+
 /// Full layout: each square is a small bordered box.
 struct BoardView<'a> {
     app: &'a App,
@@ -719,9 +769,6 @@ impl Widget for BoardView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         for row in 0..ROWS {
             for col in 0..COLS {
-                if !is_board_cell(row, col) {
-                    continue;
-                }
                 let rect = Rect::new(
                     area.x + col as u16 * CELL_W,
                     area.y + row as u16 * CELL_H,
@@ -730,6 +777,10 @@ impl Widget for BoardView<'_> {
                 )
                 .intersection(area);
                 if rect.width < 3 || rect.height < 3 {
+                    continue;
+                }
+                if !is_board_cell(row, col) {
+                    draw_path_gate(self.app, row, col, rect, buf);
                     continue;
                 }
                 let view = cell_view(self.app, row, col);
@@ -755,11 +806,27 @@ impl Widget for BoardView<'_> {
                 } else {
                     TILE_B
                 };
-                let block = Block::bordered()
+                let mut block = Block::bordered()
                     .style(Style::new().bg(tile))
                     .border_type(border_type)
-                    .border_style(border_style)
-                    .title_bottom(Line::from(number).fg(DIM).right_aligned());
+                    .border_style(border_style);
+                if self.app.paths_visible() {
+                    let label = |player, prefix| {
+                        self.app.route_marker(player, row, col).map_or_else(
+                            Line::default,
+                            |(n, arrow)| {
+                                Line::from(format!("{prefix}{n}{arrow}"))
+                                    .fg(player_color(player))
+                                    .bold()
+                            },
+                        )
+                    };
+                    block = block
+                        .title(label(Player::Light, "L"))
+                        .title_bottom(label(Player::Dark, "D"));
+                } else {
+                    block = block.title_bottom(Line::from(number).fg(DIM).right_aligned());
+                }
                 let inner = block.inner(rect);
                 block.render(rect, buf);
                 Paragraph::new(content_line(view.content).centered()).render(inner, buf);
@@ -778,9 +845,6 @@ impl Widget for TileBoard<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         for row in 0..ROWS {
             for col in 0..COLS {
-                if !is_board_cell(row, col) {
-                    continue;
-                }
                 let rect = Rect::new(
                     area.x + col as u16 * (TILE_W + TILE_GAP),
                     area.y + row as u16 * TILE_H,
@@ -789,6 +853,10 @@ impl Widget for TileBoard<'_> {
                 )
                 .intersection(area);
                 if rect.width < TILE_W || rect.height < TILE_H {
+                    continue;
+                }
+                if !is_board_cell(row, col) {
+                    draw_path_gate(self.app, row, col, rect, buf);
                     continue;
                 }
                 let view = cell_view(self.app, row, col);
@@ -802,8 +870,13 @@ impl Widget for TileBoard<'_> {
                     Highlight::None => TILE_B,
                 };
                 buf.set_style(rect, Style::new().bg(bg));
-                let number =
-                    square_number(self.app, row, col).map_or(String::new(), |n| n.to_string());
+                let number = if self.app.paths_visible() {
+                    self.app
+                        .route_marker(self.app.game.turn(), row, col)
+                        .map_or(String::new(), |(n, arrow)| format!("{n}{arrow}"))
+                } else {
+                    square_number(self.app, row, col).map_or(String::new(), |n| n.to_string())
+                };
                 let [top, bottom] =
                     Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(rect);
                 Paragraph::new(Line::from(number).fg(TILE_NUMBER)).render(top, buf);
@@ -1077,6 +1150,16 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
 }
 
 fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
+    if app.review_concealed() {
+        frame.render_widget(
+            Paragraph::new("Chronicle hidden until you try a move or press H to reveal.")
+                .fg(DIM)
+                .block(panel("Practice"))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
     let title = if app.log_scroll > 0 {
         format!("Chronicle ↑{}", app.log_scroll)
     } else {
@@ -1231,7 +1314,15 @@ fn draw_help(frame: &mut Frame, area: Rect, mode: Mode, rules: Rules) {
                 .bold()
                 .centered(),
         )
-        .title_bottom(Line::from(" press any key to close ").fg(DIM).centered())
+        .title_bottom(
+            Line::from(if rules == Rules::Masters {
+                " any key: close · P in game: paths "
+            } else {
+                " press any key to close "
+            })
+            .fg(DIM)
+            .centered(),
+        )
         .padding(Padding::horizontal(1));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
@@ -1261,6 +1352,24 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn path_overlay_shows_both_full_routes_and_the_active_compact_route() {
+        let mut app = App::new(4);
+        app.rules = Rules::Masters;
+        app.new_game(Time::ZERO);
+        app.show_help = false;
+        app.show_paths = true;
+        let full = render(&app, MIN_W, MIN_H);
+        for label in ["L12→", "D16←", "L11↓", "D11↑", "IN←", "←OUT"] {
+            assert!(full.contains(label), "missing {label}:\n{full}");
+        }
+        let compact = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
+        assert!(compact.contains("12→"), "{compact}");
+        assert!(compact.contains("IN←") && compact.contains("←OUT"));
+        app.show_paths = false;
+        assert!(!render(&app, MIN_W, MIN_H).contains("L12→"));
     }
 
     #[test]
@@ -1394,6 +1503,42 @@ mod tests {
         app.screen = Screen::Menu;
         let out = render(&app, COMPACT_MIN_W, COMPACT_MIN_H);
         assert!(out.contains("Leaderboard") && out.contains("Quit"), "{out}");
+    }
+
+    #[test]
+    fn practice_screen_hides_answers_and_chronicle_at_every_size() {
+        let mut app = App::new(4);
+        let game = ur_game::game::GameState::from_positions_in(
+            Rules::Finkel,
+            Player::Light,
+            [0, 0, 0, 0, 0, 1, 3],
+            [0; 7],
+        )
+        .unwrap();
+        app.decisions.push(crate::app::Decision {
+            throw: 1,
+            game,
+            tips: 1,
+            mv: game.legal_moves(1)[0],
+        });
+        app.phase = Phase::GameOver(Player::Light);
+        app.screen = Screen::Game;
+        app.log.push("SPOILER FROM CHRONICLE".into());
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')), Time::ZERO);
+        assert!(app.review_concealed());
+        for (w, h) in [(MIN_W, MIN_H), (COMPACT_MIN_W, COMPACT_MIN_H), (160, 50)] {
+            let out = render(&app, w, h);
+            assert!(out.contains("Practice"), "{out}");
+            assert!(!out.contains("▸ played") && !out.contains('★'), "{out}");
+            assert!(!out.contains("SPOILER FROM CHRONICLE"), "{out}");
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Char('1')), Time::ZERO);
+        let out = render(&app, 160, 50);
+        assert!(out.contains("retry:") && out.contains("▸ played"), "{out}");
+        assert!(
+            out.contains('★') && out.contains("SPOILER FROM CHRONICLE"),
+            "{out}"
+        );
     }
 
     #[test]
