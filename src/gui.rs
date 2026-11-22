@@ -52,6 +52,23 @@ const LOG_Y: f32 = 508.0;
 const LOG_H: f32 = 172.0;
 const MOVE_ROW_H: f32 = 30.0;
 
+/// Keep every move row above the footer, even with all seven moves legal.
+fn move_row_rect(count: usize, index: usize) -> Rect {
+    let top = MOVES_Y + 40.0;
+    let footer = MOVES_Y + MOVES_H - 38.0;
+    let height = MOVE_ROW_H.min((footer - 8.0 - top) / count.max(1) as f32);
+    Rect::new(
+        PANEL_X + 8.0,
+        top + index as f32 * height,
+        PANEL_W - 16.0,
+        height - 2.0,
+    )
+}
+
+fn move_list_hit(count: usize, mouse: Vec2) -> Option<usize> {
+    (0..count).find(|&i| move_row_rect(count, i).contains(mouse))
+}
+
 // ---------------------------------------------------------------------------
 // Colours
 // ---------------------------------------------------------------------------
@@ -67,6 +84,7 @@ const TEXT: Color = rgb(242, 231, 207);
 const DIM: Color = rgb(167, 169, 167);
 const ACCENT: Color = rgb(231, 190, 105);
 const TARGET: Color = rgb(96, 204, 116);
+const SELECTION: Color = rgb(65, 235, 255);
 const DANGER: Color = rgb(226, 72, 60);
 const RISK: Color = rgb(240, 150, 70);
 const WOOD: Color = rgb(179, 139, 71);
@@ -436,6 +454,12 @@ impl<'a> Ui<'a> {
         }
     }
 
+    fn selection_ring(&self, c: Vec2, piece_radius: f32) {
+        let compact = piece_radius < PIECE_R;
+        let radius = piece_radius + if compact { 3.0 } else { 5.0 };
+        self.circle_lines(c, radius, if compact { 3.0 } else { 4.0 }, BLACK);
+    }
+
     fn draw_rosette(&self, c: Vec2) {
         for k in 0..8 {
             let a = k as f32 * PI / 4.0;
@@ -695,6 +719,7 @@ impl Ui<'_> {
 
     fn game(&self, app: &mut App, now: Time) {
         self.status(app);
+        self.selection_preview(app);
         self.board(app);
         if app.paths_visible() {
             self.path_overlay(app);
@@ -812,6 +837,33 @@ impl Ui<'_> {
         self.text(&text, 460.0, 44.0, 26.0, color, true, Align::Center);
     }
 
+    fn selection_preview(&self, app: &App) {
+        if !app.current_is_human() {
+            return;
+        }
+        let Some(preview) = app.move_preview() else {
+            return;
+        };
+        let (label, instruction) = if app.review_concealed() {
+            ("Try", "Up/Down: choose · Enter: submit retry · H: reveal")
+        } else if app.review.is_some() {
+            (
+                "Inspect",
+                "Up/Down: inspect moves · Left/Right: change position",
+            )
+        } else {
+            (
+                "Selected",
+                "Click the outlined piece or its destination, or press Enter",
+            )
+        };
+        let text = format!("{label}: {preview}");
+        let width = self.text_width(&text, 22.0, true);
+        let size = 22.0 * ((BOARD_W - 24.0) / width.max(1.0)).min(1.0);
+        self.text(&text, 460.0, 96.0, size, SELECTION, true, Align::Center);
+        self.text(instruction, 460.0, 122.0, 15.0, DIM, false, Align::Center);
+    }
+
     fn board(&self, app: &App) {
         // Wooden frame, following the board's shape.
         for (pad, color) in [(14.0, WOOD_DARK), (10.0, WOOD)] {
@@ -898,11 +950,6 @@ impl Ui<'_> {
         if let Some(opt) = selected.filter(|_| !matches!(app.phase, Phase::Moving { .. })) {
             let player = app.game.turn();
             let rules = app.game.rules();
-            if !opt.mv.is_entry() {
-                let (r, c) = rules.cell_of(player, opt.mv.from).unwrap();
-                let (x, y) = cell_rect(r, c);
-                self.rect_lines(x + 2.0, y + 2.0, CELL - 4.0, CELL - 4.0, 5.0, ACCENT);
-            }
             if !app.game.is_bear_off(opt.mv) {
                 let (r, c) = rules.cell_of(player, opt.mv.to).unwrap();
                 let (x, y) = cell_rect(r, c);
@@ -989,6 +1036,18 @@ impl Ui<'_> {
             };
             self.draw_piece(to, r, mover, 0.4);
         }
+        // Draw the source halo last so tiles, route overlays, and pieces cannot obscure it.
+        if let (None, Some(opt)) = (anim, app.selected_move()) {
+            let [from, _] = move_targets(app, opt.mv);
+            self.selection_ring(
+                from,
+                if opt.mv.is_entry() {
+                    RESERVE_R
+                } else {
+                    PIECE_R
+                },
+            );
+        }
         if let Some(a) = anim {
             let p = a.mv.from as f32 + a.travelled;
             let (lo, hi) = (p.floor() as u8, (p.ceil() as u8).min(a.mv.to));
@@ -1044,14 +1103,8 @@ impl Ui<'_> {
             self.rect(BOARD_X, y + 26.0, w, 3.0, color);
         }
 
-        let entry_selected = anim.is_none()
-            && app.game.turn() == player
-            && app.selected_move().is_some_and(|o| o.mv.is_entry());
         for i in 0..waiting as usize {
             let c = reserve_point(player, i);
-            if entry_selected && i + 1 == waiting as usize {
-                self.circle_lines(c, RESERVE_R + 6.0, 3.0, ACCENT);
-            }
             self.draw_piece(c, RESERVE_R, player, 1.0);
         }
         let label_x = BOARD_X + BOARD_W - PIECES_PER_PLAYER as f32 * RESERVE_STEP - 4.0;
@@ -1168,7 +1221,9 @@ impl Ui<'_> {
     fn moves(&self, app: &mut App, now: Time) {
         let (x, y) = (PANEL_X, MOVES_Y);
         let played = app.review_played();
-        let title = if played.is_some() {
+        let title = if app.review_attempt().is_some() {
+            "Moves · + retry / » played"
+        } else if played.is_some() {
             "Moves · » played"
         } else {
             "Moves"
@@ -1187,22 +1242,26 @@ impl Ui<'_> {
             return;
         };
         let human = app.current_is_human();
-        let mut clicked = None;
+        let clicked = (human && self.clicked)
+            .then(|| move_list_hit(options.len(), self.mouse))
+            .flatten();
         for (i, opt) in options.iter().enumerate() {
-            let ry = y + 40.0 + i as f32 * MOVE_ROW_H;
-            let (rx, rw) = (x + 8.0, PANEL_W - 16.0);
+            let rect = move_row_rect(options.len(), i);
+            let (rx, ry, rw) = (rect.x, rect.y, rect.w);
             let is_sel = i == *selected;
             if is_sel {
-                self.rect(rx, ry, rw, MOVE_ROW_H - 2.0, ACCENT);
-            } else if human && self.hovered(rx, ry, rw, MOVE_ROW_H - 2.0) {
-                self.rect(rx, ry, rw, MOVE_ROW_H - 2.0, rgb(62, 50, 38));
+                self.rect(rx, ry, rw, rect.h, SELECTION);
+            } else if human && self.hovered(rx, ry, rw, rect.h) {
+                self.rect(rx, ry, rw, rect.h, rgb(62, 50, 38));
             }
             let fg = if is_sel { BACKGROUND } else { TEXT };
-            let base = ry + 20.0;
-            let number = match played {
-                Some(p) if p == i => "»".to_string(),
-                Some(_) => String::new(),
-                None => format!("{}", i + 1),
+            let base = ry + (rect.h + 18.0) / 2.0 - 3.0;
+            let number = match (app.review_attempt() == Some(i), played == Some(i)) {
+                (true, true) => "+»".to_string(),
+                (true, false) => "+".to_string(),
+                (false, true) => "»".to_string(),
+                _ if played.is_some() => String::new(),
+                _ => format!("{}", i + 1),
             };
             self.text(
                 &number,
@@ -1247,9 +1306,6 @@ impl Ui<'_> {
             if opt.risk > 0 {
                 tag(&format!("risk {}%", risk_percent(opt.risk)), RISK);
             }
-            if human && self.clicked && self.hovered(rx, ry, rw, MOVE_ROW_H - 2.0) {
-                clicked = Some(i);
-            }
         }
         if human {
             let hint_y = y + MOVES_H - 38.0;
@@ -1259,6 +1315,7 @@ impl Ui<'_> {
             } else {
                 if self.button("Hint (H)", x + 14.0, hint_y, 120.0, 28.0, false) {
                     press(app, Key::Char('h'), now);
+                    return; // This click belongs only to Hint.
                 }
                 x + 146.0
             };
@@ -1266,6 +1323,7 @@ impl Ui<'_> {
                 && self.button("Reveal (H)", x + 14.0, hint_y, 120.0, 28.0, false)
             {
                 press(app, Key::Char('h'), now);
+                return;
             }
             if let Some((is_best, why)) = app.hint_reason() {
                 // Gold for the recommended move, which its row also tags "best".
@@ -1288,7 +1346,7 @@ impl Ui<'_> {
         self.panel(x, y, PANEL_W, LOG_H, &title);
         if app.review_concealed() {
             self.text(
-                "Chronicle hidden until you try",
+                "Retry this position from your game.",
                 x + 14.0,
                 y + 64.0,
                 16.0,
@@ -1297,10 +1355,28 @@ impl Ui<'_> {
                 Align::Left,
             );
             self.text(
-                "a move or reveal the answer.",
+                "Choose a move; see how it compares.",
                 x + 14.0,
                 y + 88.0,
                 16.0,
+                DIM,
+                false,
+                Align::Left,
+            );
+            self.text(
+                "Your recorded game stays unchanged.",
+                x + 14.0,
+                y + 112.0,
+                15.0,
+                DIM,
+                false,
+                Align::Left,
+            );
+            self.text(
+                "H reveals without submitting a move.",
+                x + 14.0,
+                y + 136.0,
+                15.0,
                 DIM,
                 false,
                 Align::Left,
@@ -1700,6 +1776,95 @@ impl Ui<'_> {
         );
         if close {
             app.show_help = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Controller;
+
+    fn crowded_moves(rules: Rules) -> App {
+        let mut app = App::new(4);
+        app.screen = Screen::Game;
+        app.controllers = [Controller::Human; 2];
+        app.animations = false;
+        app.game = ur_game::game::GameState::from_positions_in(
+            rules,
+            Player::Light,
+            [0, 1, 2, 6, 7, 8, 12],
+            [0; 7],
+        )
+        .unwrap();
+        let options = app
+            .game
+            .legal_moves(3)
+            .into_iter()
+            .map(|mv| {
+                let mut after = app.game;
+                MoveOption {
+                    mv,
+                    outcome: after.apply(3, mv).unwrap(),
+                    risk: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(options.len(), 7);
+        app.phase = Phase::Choosing {
+            roll: 3,
+            options,
+            selected: 0,
+        };
+        app
+    }
+
+    #[test]
+    fn hint_click_cannot_select_the_rosette_move_in_a_crowded_list() {
+        for rules in Rules::ALL {
+            let mut app = crowded_moves(rules);
+            let Phase::Choosing { options, .. } = &app.phase else {
+                unreachable!()
+            };
+            let index = options.iter().position(|o| o.mv.from == 8).unwrap();
+            let hint_center = vec2(PANEL_X + 74.0, MOVES_Y + MOVES_H - 24.0);
+            // Reproduce the old overlap: Hint sat on the row moving off square 8.
+            let old_row = Rect::new(
+                PANEL_X + 8.0,
+                MOVES_Y + 40.0 + index as f32 * MOVE_ROW_H,
+                PANEL_W - 16.0,
+                MOVE_ROW_H - 2.0,
+            );
+            assert!(old_row.contains(hint_center));
+            assert_eq!(move_list_hit(options.len(), hint_center), None);
+            let before = app.game;
+            app.handle_key(KeyEvent::from(Key::Char('h')), Time::ZERO);
+            assert!(app.hint.is_some());
+            assert_eq!(app.game, before);
+            // Selecting another row must also leave the held rosette alone.
+            let row = move_row_rect(7, 0);
+            let chosen = move_list_hit(7, row.center()).unwrap();
+            app.play_option(chosen, Time::ZERO);
+            assert!(app.game.pieces_on_board(Player::Light).any(|p| p == 8));
+        }
+    }
+
+    #[test]
+    fn all_move_rows_fit_above_the_footer_and_have_distinct_targets() {
+        let footer = MOVES_Y + MOVES_H - 38.0;
+        for count in 1..=7 {
+            for i in 0..count {
+                let rect = move_row_rect(count, i);
+                assert!(rect.y + rect.h < footer);
+                assert!(rect.h >= 19.0);
+                assert_eq!(move_list_hit(count, rect.center()), Some(i));
+                if i + 1 < count {
+                    assert!(rect.y + rect.h < move_row_rect(count, i + 1).y);
+                }
+            }
+            for y in [footer, footer + 14.0, footer + 27.0] {
+                assert_eq!(move_list_hit(count, vec2(PANEL_X + 74.0, y)), None);
+            }
         }
     }
 }

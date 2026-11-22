@@ -576,6 +576,32 @@ impl App {
         }
     }
 
+    /// Describe the highlighted move before it is submitted, without AI advice.
+    pub fn move_preview(&self) -> Option<String> {
+        let option = self.selected_move()?;
+        let mv = option.mv;
+        let mut text = if mv.is_entry() {
+            format!("enter on {}", mv.to)
+        } else if self.game.is_bear_off(mv) {
+            format!("{} to home", mv.from)
+        } else {
+            format!("{} to {}", mv.from, mv.to)
+        };
+        if self.game.rules().is_rosette(mv.from) {
+            text.push_str(" · leaves rosette");
+        }
+        if option.outcome.captured {
+            text.push_str(" · capture");
+        }
+        if option.outcome.extra_turn {
+            text.push_str(" · extra throw");
+        }
+        if option.outcome.winner.is_some() {
+            text.push_str(" · wins");
+        }
+        Some(text)
+    }
+
     /// Options in the move-choosing phase (empty otherwise).
     #[cfg(test)]
     pub fn options(&self) -> &[MoveOption] {
@@ -2218,6 +2244,38 @@ mod tests {
         let mut app = hinted([9, 0, 0, 0, 0, 0, 0], [7, 6, 0, 0, 0, 0, 0], 3);
         app.handle_key(key(KeyCode::Right), Time::ZERO);
         assert_eq!(app.hint_reason(), Some((false, "leaves 9 at 63% risk")));
+    }
+
+    #[test]
+    fn move_preview_follows_the_selection_without_changing_the_position() {
+        let (mut app, now) = game_app(Controller::Human, Controller::Human);
+        app.game = GameState::from_positions_in(
+            Rules::Masters,
+            Player::Light,
+            [0, 0, 0, 0, 0, 0, 8],
+            [0, 0, 0, 0, 0, 0, 16],
+        )
+        .unwrap();
+        app.resolve_roll(0, now); // Masters: no marks counts as four.
+        let before = app.game;
+        let capture = app.options().iter().position(|o| o.mv.from == 8).unwrap();
+        app.select_option(capture);
+        let preview = app.move_preview().unwrap();
+        assert!(preview.starts_with("8 to 12"));
+        assert!(
+            preview.contains("leaves rosette")
+                && preview.contains("capture")
+                && preview.contains("extra throw")
+        );
+        assert_eq!(app.game, before);
+        assert!(app.hint.is_none());
+        app.handle_key(key(KeyCode::Left), now);
+        let preview = app.move_preview().unwrap();
+        assert!(preview.starts_with("enter on 4"));
+        assert!(!preview.contains("leaves rosette"));
+        assert_eq!(app.game, before);
+        app.play(0, now);
+        assert!(app.move_preview().is_none());
     }
 
     #[test]

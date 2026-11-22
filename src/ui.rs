@@ -66,6 +66,7 @@ const BACKGROUND: Color = Color::Rgb(9, 17, 30);
 const PANEL: Color = Color::Rgb(17, 31, 49);
 const TEXT: Color = Color::Rgb(242, 231, 207);
 const TARGET: Color = Color::Green;
+const SELECTION: Color = Color::Rgb(65, 235, 255);
 const DIM: Color = Color::Rgb(154, 163, 174);
 const BOARD_EDGE: Color = Color::Rgb(156, 126, 75); // lapis-and-shell boards had wooden frames
 const ROSETTE_COLOR: Color = Color::Rgb(132, 177, 235); // lapis lazuli
@@ -76,7 +77,7 @@ const WIN_COLOR: Color = Color::LightGreen;
 const TILE_A: Color = Color::Rgb(31, 49, 67);
 const TILE_B: Color = Color::Rgb(39, 60, 78);
 const TILE_ROSETTE: Color = Color::Rgb(28, 48, 115);
-const TILE_FROM: Color = Color::Rgb(125, 100, 15);
+const TILE_FROM: Color = Color::Rgb(156, 126, 75);
 const TILE_TO: Color = Color::Rgb(25, 100, 50);
 const TILE_IMPACT: Color = Color::Rgb(150, 30, 30);
 const TILE_NUMBER: Color = Color::Rgb(165, 145, 115);
@@ -534,7 +535,7 @@ fn status_line(app: &App) -> Line<'static> {
         }
         _ if !app.current_is_human() => " (computer) is thinking…".to_string(),
         Phase::AwaitRoll => " to roll the dice".to_string(),
-        Phase::Choosing { .. } => " to choose a move".to_string(),
+        Phase::Choosing { .. } => format!(" selected: {}", app.move_preview().unwrap_or_default()),
         Phase::NoMoves { .. } => " cannot move".to_string(),
     };
     Line::from(vec![who, Span::raw(tail)]).centered()
@@ -595,7 +596,7 @@ fn reserve_line(app: &App, player: Player) -> Paragraph<'static> {
         let mut s: Vec<Span> = (0..n)
             .map(|i| {
                 let style = if hl && i + 1 == n {
-                    Style::new().fg(ACCENT).bold()
+                    Style::new().fg(SELECTION).bold()
                 } else {
                     Style::new().fg(color)
                 };
@@ -789,7 +790,7 @@ impl Widget for BoardView<'_> {
                         (Style::new().fg(Color::LightRed).bold(), BorderType::Thick)
                     }
                     Highlight::Moving | Highlight::From => {
-                        (Style::new().fg(ACCENT).bold(), BorderType::Thick)
+                        (Style::new().fg(SELECTION).bold(), BorderType::Thick)
                     }
                     Highlight::To => (Style::new().fg(TARGET).bold(), BorderType::Thick),
                     Highlight::None if is_rosette_cell(row, col) => {
@@ -1086,7 +1087,9 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
         Mode::Compact => short_move(rules, mv),
     };
     let played = app.review_played();
-    let block = panel(if played.is_some() {
+    let block = panel(if app.review_attempt().is_some() {
+        "Moves · + retry / ▸ played"
+    } else if played.is_some() {
         "Moves · ▸ played"
     } else {
         "Moves"
@@ -1098,10 +1101,12 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
             .iter()
             .enumerate()
             .map(|(i, o)| {
-                let number = match played {
-                    Some(p) if p == i => "▸ ".to_string(),
-                    Some(_) => "  ".to_string(),
-                    None => format!("{} ", i + 1),
+                let number = match (app.review_attempt() == Some(i), played == Some(i)) {
+                    (true, true) => "+▸ ".to_string(),
+                    (true, false) => "+ ".to_string(),
+                    (false, true) => "▸ ".to_string(),
+                    _ if played.is_some() => "  ".to_string(),
+                    _ => format!("{} ", i + 1),
                 };
                 let mut spans = vec![Span::raw(number), Span::raw(describe(o.mv))];
                 if o.outcome.captured {
@@ -1128,7 +1133,7 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
                 }
                 let line = Line::from(spans);
                 if i == *selected {
-                    ListItem::new(line).style(Style::new().fg(Color::Black).bg(ACCENT))
+                    ListItem::new(line).style(Style::new().fg(Color::Black).bg(SELECTION))
                 } else {
                     ListItem::new(line)
                 }
@@ -1136,7 +1141,7 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
             .collect(),
         Phase::Moving { option, .. } => vec![
             ListItem::new(format!("▶ {}", describe(option.mv)))
-                .style(Style::new().fg(Color::Black).bg(ACCENT)),
+                .style(Style::new().fg(Color::Black).bg(SELECTION)),
         ],
         Phase::NoMoves { .. } => vec![ListItem::new("No legal move.").fg(DIM)],
         _ => vec![],
@@ -1152,7 +1157,7 @@ fn draw_moves(frame: &mut Frame, app: &App, area: Rect, mode: Mode) {
 fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
     if app.review_concealed() {
         frame.render_widget(
-            Paragraph::new("Chronicle hidden until you try a move or press H to reveal.")
+            Paragraph::new("Retry this position, then compare your move. The recorded game stays unchanged. H reveals without a try.")
                 .fg(DIM)
                 .block(panel("Practice"))
                 .wrap(Wrap { trim: true }),
@@ -1426,6 +1431,42 @@ mod tests {
     }
 
     #[test]
+    fn selected_move_preview_fits_the_smallest_terminal() {
+        let mut app = App::new(0);
+        app.screen = Screen::Game;
+        app.game = ur_game::game::GameState::from_positions_in(
+            Rules::Masters,
+            Player::Light,
+            [0, 0, 0, 0, 0, 0, 8],
+            [0, 0, 0, 0, 0, 0, 16],
+        )
+        .unwrap();
+        let options = app
+            .game
+            .legal_moves(4)
+            .into_iter()
+            .map(|mv| {
+                let mut after = app.game;
+                crate::app::MoveOption {
+                    mv,
+                    outcome: after.apply(4, mv).unwrap(),
+                    risk: 0,
+                }
+            })
+            .collect();
+        app.phase = Phase::Choosing {
+            roll: 4,
+            options,
+            selected: 1,
+        };
+        let preview = app.move_preview().unwrap();
+        for (w, h) in [(COMPACT_MIN_W, COMPACT_MIN_H), (MIN_W, MIN_H)] {
+            let out = render(&app, w, h);
+            assert!(out.lines().next().unwrap().contains(&preview), "{out}");
+        }
+    }
+
+    #[test]
     fn move_list_and_help_show_capture_risk() {
         use crate::app::MoveOption;
         use ur_game::game::Outcome;
@@ -1538,6 +1579,10 @@ mod tests {
         assert!(
             out.contains('★') && out.contains("SPOILER FROM CHRONICLE"),
             "{out}"
+        );
+        assert!(
+            out.contains("+▸"),
+            "the retry and original move should both be marked: {out}"
         );
     }
 

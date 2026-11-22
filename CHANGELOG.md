@@ -17,6 +17,13 @@
 - Abandoning a started human-versus-computer match for a new game counts as a loss. Untouched matches are exempt.
 - Saved matches retain decisions for later review. Existing Finkel saves and older leaderboard files remain readable.
 
+### Fixes
+
+- Added a selected-move preview showing the start, destination, and immediate effects, including when a piece will leave a rosette.
+- Made the selected move row bright cyan and marked its piece with a thin black ring in the window, so selection stands out against the board.
+- Prevented the Hint button from overlapping and accidentally playing a move when six or seven moves are legal, including a move off the contested rosette.
+- Clarified practice instructions and marked the retried move separately from the original choice.
+
 ### Expert reliability
 
 - Cache-save failures are visible in the Chronicle and menu. Expert remains playable from memory; `T` retries saving without solving again.

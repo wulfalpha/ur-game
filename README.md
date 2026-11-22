@@ -203,9 +203,12 @@ reviews use Hard until a verified or newly solved table is ready.
 | Esc           | Back to the menu (quits from the menu)    |
 | q / Ctrl+C    | Quit                                      |
 
-When you choose a move, the piece that will move is highlighted in gold
-and the square it lands on in green. In the move list, ⚔ marks a capture,
-✦ a rosette and ♛ a winning move.
+When you choose a move, its move-list row is highlighted in bright cyan.
+In the window, a thin black ring surrounds the piece that will move.
+The terminal highlights its starting square in cyan. The landing square is
+green (red for a capture). A move preview names the selected piece's start
+and destination and flags leaving a rosette, captures, extra throws, and wins.
+In the move list, ⚔ marks a capture, ✦ a rosette and ♛ a winning move.
 
 A move that leaves its piece where the opponent could hit it shows the
 chance of that happening on their next throw, such as ⚠31% ("risk 31%" in
@@ -288,8 +291,10 @@ evaluated loss (the earliest if tied). Press **X** to enter practice mode
 (or press **X** on the finished game to start without revealing answers):
 choose with ↑/↓, then submit with Enter, 1–9, or a click. The recommendation,
 original move, grade, and Chronicle stay hidden until you try a move or press
-**H** to reveal. Your retry is graded and explained without changing the
-recorded game, results, or saved match. Practice stays on as you navigate;
+**H** to reveal. After submitting, **+** marks your retry and **▸** (**»** in
+the window) marks the original move; both marks appear if they match. Your
+retry is graded and explained without changing the recorded game, results,
+or saved match. Practice stays on as you navigate;
 press **X** again to return to ordinary review. The window also has buttons
 for the biggest mistake and practice. The Chronicle follows along, and gets
 a one-line
